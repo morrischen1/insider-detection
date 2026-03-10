@@ -62,7 +62,7 @@ npm install
 
 2. **Configure Environment**
 ```bash
-cp .env.example .env
+cp ex.example .env
 nano .env
 ```
 

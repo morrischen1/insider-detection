@@ -1,0 +1,29 @@
+# Database
+DATABASE_URL="file:./insider_detection.db"
+
+# Authentication (IMPORTANT: Change these!)
+AUTH_ENABLED="true"
+ADMIN_PASSWORD="changeme"          # CHANGE THIS to a strong password!
+# ADMIN_PASSWORD_HASH=""           # Or use a bcrypt hash instead (more secure)
+
+# Polymarket CLOB API (for auto-trading)
+POLYMARKET_API_KEY=""
+POLYMARKET_API_SECRET=""
+POLYMARKET_ADDRESS=""
+
+# Kalshi API (for auto-trading)
+KALSHI_API_KEY=""
+KALSHI_API_SECRET=""
+
+# Telegram Notifications
+TELEGRAM_BOT_TOKEN=""
+TELEGRAM_CHAT_ID=""
+
+# Discord Notifications
+DISCORD_WEBHOOK_URL=""
+
+# Slack Notifications
+SLACK_WEBHOOK_URL=""
+
+# Custom Webhook
+CUSTOM_WEBHOOK_URL=""

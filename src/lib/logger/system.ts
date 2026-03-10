@@ -1,0 +1,117 @@
+/**
+ * System Logger
+ * Logs system activity to the database
+ */
+
+import { detectionLogs } from '@/lib/db';
+import type { Platform, LogType } from '@/types';
+
+interface LogEntry {
+  platform: Platform;
+  type: LogType;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export function logDetection(entry: LogEntry): void {
+  try {
+    detectionLogs.create({
+      platform: entry.platform,
+      type: entry.type,
+      message: entry.message,
+      details: entry.details,
+    });
+  } catch (error) {
+    console.error('Failed to log detection:', error);
+  }
+}
+
+// Convenience functions
+export const logger = {
+  info: (platform: Platform, message: string, details?: Record<string, unknown>) =>
+    logDetection({ platform, type: 'info', message, details }),
+
+  warning: (platform: Platform, message: string, details?: Record<string, unknown>) =>
+    logDetection({ platform, type: 'warning', message, details }),
+
+  error: (platform: Platform, message: string, details?: Record<string, unknown>) =>
+    logDetection({ platform, type: 'error', message, details }),
+
+  detection: (platform: Platform, message: string, details?: Record<string, unknown>) =>
+    logDetection({ platform, type: 'detection', message, details }),
+
+  autotrade: (platform: Platform, message: string, details?: Record<string, unknown>) =>
+    logDetection({ platform, type: 'autotrade', message, details }),
+};
+
+// Get logs with filtering
+export function getLogs(params: {
+  platform?: Platform;
+  type?: LogType;
+  limit?: number;
+  offset?: number;
+}): { logs: Array<{ id: string; platform: string; type: string; message: string; details?: Record<string, unknown>; timestamp: Date }>; total: number; hasMore: boolean } {
+  const { platform, type, limit = 100, offset = 0 } = params;
+
+  const logs = detectionLogs.getRecent(limit + offset, platform, type);
+  const paginatedLogs = logs.slice(offset, offset + limit);
+
+  return {
+    logs: paginatedLogs,
+    total: logs.length,
+    hasMore: logs.length > offset + limit,
+  };
+}
+
+// Clean up old logs based on retention policy
+export function cleanupOldLogs(retentionDays: number = 365): number {
+  return detectionLogs.deleteOld(retentionDays);
+}
+
+// Export logs as JSON
+export function exportLogs(params: {
+  platform?: Platform;
+  type?: LogType;
+}): string {
+  const logs = detectionLogs.getRecent(10000, params.platform, params.type);
+  return JSON.stringify(logs, null, 2);
+}
+
+// Get log statistics
+export function getLogStats(platform?: Platform): {
+  total: number;
+  byType: Record<LogType, number>;
+  last24h: number;
+  last7d: number;
+} {
+  const logs = detectionLogs.getRecent(10000, platform);
+
+  const now = Date.now();
+  const last24h = now - 24 * 60 * 60 * 1000;
+  const last7d = now - 7 * 24 * 60 * 60 * 1000;
+
+  const byType: Record<LogType, number> = {
+    info: 0,
+    warning: 0,
+    error: 0,
+    detection: 0,
+    autotrade: 0,
+  };
+
+  let last24hCount = 0;
+  let last7dCount = 0;
+
+  for (const log of logs) {
+    byType[log.type as LogType]++;
+    const logTime = log.timestamp.getTime();
+    if (logTime >= last24h) last24hCount++;
+    if (logTime >= last7d) last7dCount++;
+  }
+
+  return {
+    total: logs.length,
+    byType,
+    last24h: last24hCount,
+    last7d: last7dCount,
+  };
+}

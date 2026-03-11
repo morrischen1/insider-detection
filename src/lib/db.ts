@@ -31,6 +31,163 @@ db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
 // ============================================
+// Auto-initialize database schema
+// ============================================
+
+// Use global to persist across module reloads in development
+const globalForDb = globalThis as unknown as { schemaInitialized?: boolean };
+
+function initializeSchema() {
+  // Check both local and global flags
+  if (globalForDb.schemaInitialized) return;
+  
+  const schema = `
+    CREATE TABLE IF NOT EXISTS accounts (
+      id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL,
+      address TEXT NOT NULL,
+      first_seen INTEGER NOT NULL,
+      total_trades INTEGER NOT NULL DEFAULT 0,
+      total_volume REAL NOT NULL DEFAULT 0,
+      win_rate REAL,
+      is_watchlisted INTEGER NOT NULL DEFAULT 0,
+      watchlist_reason TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(platform, address)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform);
+    CREATE INDEX IF NOT EXISTS idx_accounts_watchlisted ON accounts(is_watchlisted);
+
+    CREATE TABLE IF NOT EXISTS trades (
+      id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL,
+      market_id TEXT NOT NULL,
+      market_ticker TEXT,
+      account_id TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      price REAL NOT NULL,
+      size REAL NOT NULL,
+      usd_value REAL NOT NULL,
+      timestamp INTEGER NOT NULL,
+      detected_at INTEGER NOT NULL,
+      is_suspicious INTEGER NOT NULL DEFAULT 0,
+      insider_probability REAL,
+      FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_trades_platform ON trades(platform);
+    CREATE INDEX IF NOT EXISTS idx_trades_market_id ON trades(market_id);
+    CREATE INDEX IF NOT EXISTS idx_trades_account_id ON trades(account_id);
+    CREATE INDEX IF NOT EXISTS idx_trades_suspicious ON trades(is_suspicious);
+    CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_trades_detected_at ON trades(detected_at);
+
+    CREATE TABLE IF NOT EXISTS watchlist (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      probability REAL NOT NULL,
+      flagged_at INTEGER NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+      UNIQUE(account_id, is_active)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_watchlist_platform ON watchlist(platform);
+    CREATE INDEX IF NOT EXISTS idx_watchlist_active ON watchlist(is_active);
+
+    CREATE TABLE IF NOT EXISTS detection_logs (
+      id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL,
+      type TEXT NOT NULL,
+      message TEXT NOT NULL,
+      details TEXT,
+      timestamp INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_detection_logs_platform ON detection_logs(platform);
+    CREATE INDEX IF NOT EXISTS idx_detection_logs_type ON detection_logs(type);
+    CREATE INDEX IF NOT EXISTS idx_detection_logs_timestamp ON detection_logs(timestamp);
+
+    CREATE TABLE IF NOT EXISTS api_logs (
+      id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL,
+      endpoint TEXT NOT NULL,
+      method TEXT NOT NULL,
+      status INTEGER NOT NULL,
+      response_time INTEGER NOT NULL,
+      error_message TEXT,
+      timestamp INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_api_logs_platform ON api_logs(platform);
+    CREATE INDEX IF NOT EXISTS idx_api_logs_timestamp ON api_logs(timestamp);
+
+    CREATE TABLE IF NOT EXISTS auto_trades (
+      id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL,
+      trigger_trade_id TEXT NOT NULL,
+      market_id TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      amount REAL NOT NULL,
+      probability REAL NOT NULL,
+      status TEXT NOT NULL,
+      executed_at INTEGER,
+      error_message TEXT,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (trigger_trade_id) REFERENCES trades(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_auto_trades_platform ON auto_trades(platform);
+    CREATE INDEX IF NOT EXISTS idx_auto_trades_status ON auto_trades(status);
+    CREATE INDEX IF NOT EXISTS idx_auto_trades_created_at ON auto_trades(created_at);
+
+    CREATE TABLE IF NOT EXISTS config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      platform TEXT,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(key, platform)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_config_platform ON config(platform);
+
+    CREATE TABLE IF NOT EXISTS notification_settings (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      config TEXT NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      platform TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_notification_settings_type ON notification_settings(type);
+    CREATE INDEX IF NOT EXISTS idx_notification_settings_active ON notification_settings(is_active);
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+  `;
+
+  try {
+    db.exec(schema);
+    console.log('Database schema initialized successfully');
+    globalForDb.schemaInitialized = true;
+  } catch (error) {
+    console.error('Error initializing database schema:', error);
+  }
+}
+
+// Run schema initialization
+initializeSchema();
+
+// ============================================
 // Helper functions
 // ============================================
 

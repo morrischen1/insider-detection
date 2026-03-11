@@ -1,11 +1,14 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
-// No authentication required for general access
-// Auth is only needed for auto-trading features (handled at API level)
+// Note: We don't check auth in middleware because Next.js Edge runtime
+// doesn't share memory with Node.js runtime where sessions are stored.
+// Auth is handled at the API level and frontend level.
 
 export function middleware(request: NextRequest) {
-  // Pass through all requests - dashboard is public on local network
+  // Just pass through - auth is handled by:
+  // 1. API routes return 401 if not authenticated
+  // 2. Frontend shows login modal if not authenticated
   return NextResponse.next();
 }
 

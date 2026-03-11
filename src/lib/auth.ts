@@ -1,9 +1,11 @@
 /**
  * Simple Authentication System
  * Password-based authentication for local network access
+ * Sessions stored in SQLite database for persistence across restarts
  */
 
 import bcrypt from 'bcryptjs';
+import { db } from './db';
 
 // Session storage (in-memory, resets on server restart)
 const sessions = new Map<string, { createdAt: Date; expiresAt: Date }>();
@@ -45,52 +47,69 @@ export function createSession(): string {
     .map(b => b.toString(16).padStart(2, '0'))
     .join('');
 
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + SESSION_DURATION_HOURS * 60 * 60 * 1000);
+  const now = Date.now();
+  const expiresAt = now + SESSION_DURATION_HOURS * 60 * 60 * 1000;
 
-  sessions.set(token, { createdAt: now, expiresAt });
-
-  return token;
-}
+  // Store session in database
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO sessions (id, created_at, expires_at)
+      VALUES (?, ?, ?)
+    `);
+    stmt.run(token, now, expiresAt);
+  } catch (error) {
+    console.error('Failed to create session:', error);
+  }
 
 /**
  * Validate a session token
  */
 export function validateSession(token: string): boolean {
-  const session = sessions.get(token);
+    try {
+    const stmt = db.prepare('SELECT * FROM sessions WHERE id = ?');
+    const session = stmt.get(token) as { id: string; created_at: number; expires_at: number } | undefined;
 
-  if (!session) return false;
+    if (!session) return false;
 
-  if (new Date() > session.expiresAt) {
-    sessions.delete(token);
+    if (Date.now() > session.expires_at) {
+      // Delete expired session
+      const deleteStmt = db.prepare('DELETE FROM sessions WHERE id = ?');
+      deleteStmt.run(token);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error('Failed to validate session:', error);
     return false;
   }
-
-  return true;
 }
 
 /**
  * Invalidate a session (logout)
  */
 export function invalidateSession(token: string): void {
-  sessions.delete(token);
+  try {
+    const stmt = db.prepare('DELETE FROM sessions WHERE id = ?');
+    stmt.run(token);
+  } catch (error) {
+    console.error('Failed to invalidate session:', error);
+  }
 }
 
 /**
  * Clean up expired sessions
  */
 export function cleanupSessions(): number {
-  const now = new Date();
-  let cleaned = 0;
-
-  for (const [token, session] of sessions.entries()) {
-    if (now > session.expiresAt) {
-      sessions.delete(token);
-      cleaned++;
-    }
+  try {
+    const now = Date.now();
+    const stmt = db.prepare('DELETE FROM sessions WHERE expires_at < ?');
+    const result = stmt.run(now);
+    return result.changes;
+  } catch (error) {
+    console.error('Failed to cleanup sessions:', error);
+    return 0;
   }
-
-  return cleaned;
 }
 
 /**

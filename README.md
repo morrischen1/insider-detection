@@ -1,4 +1,4 @@
-# Insider Trade Detection System
+# Insider Trade Detection System (not fully working..)
 
 A comprehensive system for detecting potential insider trades on Polymarket and Kalshi prediction markets. This tool continuously monitors markets, evaluates trades based on configurable criteria, and provides real-time alerts when suspicious activity is detected.
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -49,26 +49,32 @@ export default function Dashboard() {
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [password, setPassword] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
 
-  // Check auth status
-  const checkAuth = useCallback(async () => {
-    try {
-      const res = await fetch('/api/auth');
-      const data = await res.json();
-      setIsAuthenticated(data.authenticated);
-      setAuthEnabled(data.authEnabled ?? true);
-
-      if (!data.authenticated && data.authEnabled) {
+  // Check auth status - only once on mount
+  useEffect(() => {
+    const checkAuth = async () => {
+      try {
+        const res = await fetch('/api/auth');
+        const data = await res.json();
+        setIsAuthenticated(data.authenticated);
+        setAuthEnabled(data.authEnabled ?? true);
+        setShowLoginModal(!data.authenticated && data.authEnabled);
+      } catch (error) {
+        console.error('Auth check failed:', error);
+        // If auth check fails, show login modal
         setShowLoginModal(true);
+      } finally {
+        setAuthChecked(true);
       }
-    } catch (error) {
-      console.error('Auth check failed:', error);
-    }
+    };
+    checkAuth();
   }, []);
 
   // Login
-  const handleLogin = async (e: React.FormEvent) => {
+  const handleLogin = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     setIsLoggingIn(true);
 
     try {
@@ -85,19 +91,18 @@ export default function Dashboard() {
         setShowLoginModal(false);
         setPassword('');
         toast.success('Logged in successfully');
-        fetchData();
       } else {
-        toast.error(data.error || 'Login failed');
+        toast.error(data.error || 'Invalid password');
       }
     } catch (error) {
       toast.error('Login failed');
     } finally {
       setIsLoggingIn(false);
     }
-  };
+  }, [password]);
 
   // Logout
-  const handleLogout = async () => {
+  const handleLogout = useCallback(async () => {
     try {
       await fetch('/api/auth', {
         method: 'POST',
@@ -110,7 +115,7 @@ export default function Dashboard() {
     } catch (error) {
       toast.error('Logout failed');
     }
-  };
+  }, []);
 
   // Fetch all data
   const fetchData = useCallback(async () => {
@@ -166,20 +171,16 @@ export default function Dashboard() {
   }, [isAuthenticated, authEnabled]);
 
   useEffect(() => {
-    checkAuth();
-  }, [checkAuth]);
-
-  useEffect(() => {
-    if (isAuthenticated || !authEnabled) {
+    if (authChecked && (isAuthenticated || !authEnabled)) {
       fetchData();
     }
-  }, [fetchData, isAuthenticated, authEnabled]);
+  }, [fetchData, isAuthenticated, authEnabled, authChecked]);
 
   useEffect(() => {
-    if (!autoRefresh || (!isAuthenticated && authEnabled)) return;
+    if (!autoRefresh || (!isAuthenticated && authEnabled) || !authChecked) return;
     const interval = setInterval(fetchData, 10000);
     return () => clearInterval(interval);
-  }, [autoRefresh, fetchData, isAuthenticated, authEnabled]);
+  }, [autoRefresh, fetchData, isAuthenticated, authEnabled, authChecked]);
 
   // Start/stop detection
   const toggleDetection = async (platform: Platform, start: boolean) => {
@@ -234,43 +235,18 @@ export default function Dashboard() {
     return 'bg-green-500';
   };
 
-  // Login Modal
-  const LoginModal = () => (
-    <Dialog open={showLoginModal} onOpenChange={setShowLoginModal}>
-      <DialogContent className="sm:max-w-md" onPointerDownOutside={(e) => e.preventDefault()}>
-        <DialogHeader>
-          <DialogTitle>Authentication Required</DialogTitle>
-          <DialogDescription>
-            Enter your password to access the Insider Detection System.
-          </DialogDescription>
-        </DialogHeader>
-        <form onSubmit={handleLogin}>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter password"
-                autoFocus
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button type="submit" disabled={isLoggingIn || !password}>
-              {isLoggingIn ? 'Logging in...' : 'Login'}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
+
+  if (!authChecked) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-background">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
 
   if (isLoading && (isAuthenticated || !authEnabled)) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
+      <div className="flex items-center justify-center min-h-screen bg-background">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
       </div>
     );
@@ -278,9 +254,42 @@ export default function Dashboard() {
 
   return (
     <>
-      <LoginModal />
+      {/* Login Modal - inline to prevent re-render issues */}
+      <Dialog open={showLoginModal} onOpenChange={(open) => {
+        // Prevent closing by clicking outside
+        if (!open) return;
+      }}>
+        <DialogContent className="sm:max-w-md" onPointerDownOutside={(e) => e.preventDefault()} onInteractOutside={(e) => e.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle>Authentication Required</DialogTitle>
+            <DialogDescription>
+              Enter your password to access the Insider Detection System.
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleLogin}>
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label htmlFor="password">Password</Label>
+                <Input
+                  id="password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Enter password"
+                  autoFocus
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button type="submit" disabled={isLoggingIn || !password}>
+                {isLoggingIn ? 'Logging in...' : 'Login'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
-      <div className="container mx-auto p-4 max-w-7xl">
+      <div className="container mx-auto p-4 max-w-7xl bg-background min-h-screen">
         <div className="flex items-center justify-between mb-6">
           <div>
             <h1 className="text-3xl font-bold">Insider Trade Detection System</h1>

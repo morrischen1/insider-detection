@@ -129,10 +129,12 @@ export default function Dashboard() {
         const data = await res.json();
         setIsAuthenticated(data.authenticated);
         setAuthEnabled(data.authEnabled ?? true);
-        setShowLoginModal(!data.authenticated && data.authEnabled);
+        // Don't show login modal on initial load - dashboard is public
+        // Login is only required for auto-trading features
+        setShowLoginModal(false);
       } catch (error) {
         console.error('Auth check failed:', error);
-        setShowLoginModal(true);
+        setShowLoginModal(false);
       } finally {
         setAuthChecked(true);
       }
@@ -188,9 +190,9 @@ export default function Dashboard() {
     }
   }, []);
 
-  // Fetch all data
+  // Fetch all data - public access allowed
   const fetchData = useCallback(async () => {
-    if (!isAuthenticated && authEnabled) return;
+    // Fetch data regardless of auth status - dashboard is public
 
     try {
       const [statusRes, statsRes, watchlistRes, configRes] = await Promise.all([
@@ -201,10 +203,11 @@ export default function Dashboard() {
       ]);
 
       // Handle 401 responses - but only if we didn't just log in
+      // Note: 401s are okay for public access, just means some features need auth
       if (!justLoggedIn.current && (statusRes.status === 401 || statsRes.status === 401)) {
+        // Don't force login modal - just mark as not authenticated
         setIsAuthenticated(false);
-        setShowLoginModal(true);
-        return;
+        // Continue fetching other data
       }
 
       const [status, statsData, watchlistData, configData] = await Promise.all([
@@ -242,16 +245,18 @@ export default function Dashboard() {
   }, [isAuthenticated, authEnabled]);
 
   useEffect(() => {
-    if (authChecked && (isAuthenticated || !authEnabled)) {
+    // Fetch data on mount - dashboard is publicly accessible
+    if (authChecked) {
       fetchData();
     }
-  }, [fetchData, isAuthenticated, authEnabled, authChecked]);
+  }, [fetchData, authChecked]);
 
   useEffect(() => {
-    if (!autoRefresh || (!isAuthenticated && authEnabled) || !authChecked) return;
+    // Auto-refresh works for all users
+    if (!autoRefresh || !authChecked) return;
     const interval = setInterval(fetchData, 10000);
     return () => clearInterval(interval);
-  }, [autoRefresh, fetchData, isAuthenticated, authEnabled, authChecked]);
+  }, [autoRefresh, fetchData, authChecked]);
 
   // Start/stop detection
   const toggleDetection = async (platform: Platform, start: boolean) => {
@@ -345,7 +350,7 @@ export default function Dashboard() {
     );
   }
 
-  if (isLoading && (isAuthenticated || !authEnabled)) {
+  if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-background">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
@@ -380,10 +385,16 @@ export default function Dashboard() {
             <Button onClick={fetchData} variant="outline" size="sm">
               Refresh Now
             </Button>
-            {authEnabled && isAuthenticated && (
-              <Button onClick={handleLogout} variant="destructive" size="sm">
-                Logout
-              </Button>
+            {authEnabled && (
+              isAuthenticated ? (
+                <Button onClick={handleLogout} variant="destructive" size="sm">
+                  Logout
+                </Button>
+              ) : (
+                <Button onClick={() => setShowLoginModal(true)} variant="outline" size="sm">
+                  Login (for Auto-Trade)
+                </Button>
+              )
             )}
           </div>
         </div>
@@ -727,13 +738,22 @@ export default function Dashboard() {
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="flex items-center justify-between">
-                    <Label htmlFor="auto-trade">Auto-Trade Enabled</Label>
+                    <div>
+                      <Label htmlFor="auto-trade">Auto-Trade Enabled</Label>
+                      {!isAuthenticated && (
+                        <p className="text-xs text-muted-foreground">Requires login</p>
+                      )}
+                    </div>
                     <Switch
                       id="auto-trade"
                       checked={config?.global?.autoTradeEnabled}
-                      onCheckedChange={(checked) =>
-                        updateConfig({ autoTradeEnabled: checked })
-                      }
+                      onCheckedChange={(checked) => {
+                        if (checked && !isAuthenticated) {
+                          setShowLoginModal(true);
+                          return;
+                        }
+                        updateConfig({ autoTradeEnabled: checked });
+                      }}
                     />
                   </div>
                   <div className="space-y-2">

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -32,65 +32,6 @@ import {
 import { toast } from 'sonner';
 import type { Platform, DetectionEngineState, DashboardStats, RecentDetection, WatchlistEntry, LogEntry } from '@/types';
 
-// Separate Login Modal Component to prevent re-renders
-function LoginModal({ 
-  isOpen, 
-  onLogin, 
-  isLoggingIn 
-}: { 
-  isOpen: boolean; 
-  onLogin: (password: string) => Promise<void>; 
-  isLoggingIn: boolean;
-}) {
-  const [password, setPassword] = useState('');
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    await onLogin(password);
-    setPassword('');
-  };
-
-  return (
-    <Dialog open={isOpen} modal={true}>
-      <DialogContent 
-        className="sm:max-w-md" 
-        onPointerDownOutside={(e) => e.preventDefault()} 
-        onInteractOutside={(e) => e.preventDefault()}
-        onCloseAutoFocus={(e) => e.preventDefault()}
-      >
-        <DialogHeader>
-          <DialogTitle>Authentication Required</DialogTitle>
-          <DialogDescription>
-            Enter your password to access the Insider Detection System.
-          </DialogDescription>
-        </DialogHeader>
-        <form onSubmit={handleSubmit}>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter password"
-                autoFocus
-                autoComplete="current-password"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button type="submit" disabled={isLoggingIn || !password}>
-              {isLoggingIn ? 'Logging in...' : 'Login'}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [engineStates, setEngineStates] = useState<Record<Platform, DetectionEngineState> | null>(null);
@@ -102,113 +43,29 @@ export default function Dashboard() {
   const [isLoading, setIsLoading] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
 
-  // Auth state
+  // Auth state - only for auto-trading
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [authEnabled, setAuthEnabled] = useState(true);
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
-  const [authChecked, setAuthChecked] = useState(false);
-  
-  // Track if we just logged in to prevent race conditions
-  const justLoggedIn = useRef(false);
+  const [pendingAutoTradeEnable, setPendingAutoTradeEnable] = useState(false);
 
-  // Check auth status - only once on mount
-  useEffect(() => {
-    const checkAuth = async () => {
-      // Skip auth check if we just logged in
-      if (justLoggedIn.current) {
-        justLoggedIn.current = false;
-        return;
-      }
-      
-      try {
-        const res = await fetch('/api/auth');
-        const data = await res.json();
-        setIsAuthenticated(data.authenticated);
-        setAuthEnabled(data.authEnabled ?? true);
-        setShowLoginModal(!data.authenticated && data.authEnabled);
-      } catch (error) {
-        console.error('Auth check failed:', error);
-        setShowLoginModal(true);
-      } finally {
-        setAuthChecked(true);
-      }
-    };
-    checkAuth();
-  }, []);
-
-  // Login handler - stable reference
-  const handleLogin = useCallback(async (password: string) => {
-    setIsLoggingIn(true);
-
-    try {
-      const res = await fetch('/api/auth', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'login', password }),
-      });
-
-      const data = await res.json();
-
-      if (data.success) {
-        justLoggedIn.current = true;
-        setIsAuthenticated(true);
-        setShowLoginModal(false);
-        toast.success('Logged in successfully');
-        // Fetch data after successful login
-        setTimeout(() => {
-          fetchData();
-        }, 100);
-      } else {
-        toast.error(data.error || 'Invalid password');
-      }
-    } catch (error) {
-      toast.error('Login failed');
-    } finally {
-      setIsLoggingIn(false);
-    }
-  }, []);
-
-  // Logout
-  const handleLogout = useCallback(async () => {
-    try {
-      await fetch('/api/auth', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'logout' }),
-      });
-      setIsAuthenticated(false);
-      setShowLoginModal(true);
-      toast.success('Logged out');
-    } catch (error) {
-      toast.error('Logout failed');
-    }
-  }, []);
-
-  // Fetch all data
+  // Fetch all data - no auth required for viewing
   const fetchData = useCallback(async () => {
-    if (!isAuthenticated && authEnabled) return;
-
     try {
-      const [statusRes, statsRes, watchlistRes, configRes] = await Promise.all([
+      const [statusRes, statsRes, watchlistRes, configRes, logsRes] = await Promise.all([
         fetch('/api/detection/status'),
         fetch('/api/stats'),
         fetch('/api/watchlist?limit=20'),
         fetch('/api/config'),
+        fetch('/api/logs?limit=100'),
       ]);
 
-      // Handle 401 responses - but only if we didn't just log in
-      if (!justLoggedIn.current && (statusRes.status === 401 || statsRes.status === 401)) {
-        setIsAuthenticated(false);
-        setShowLoginModal(true);
-        return;
-      }
-
-      const [status, statsData, watchlistData, configData] = await Promise.all([
+      const [status, statsData, watchlistData, configData, logsData] = await Promise.all([
         statusRes.json(),
         statsRes.json(),
         watchlistRes.json(),
         configRes.json(),
+        logsRes.json(),
       ]);
 
       if (status.success) {
@@ -231,24 +88,37 @@ export default function Dashboard() {
       if (configData.success) {
         setConfig(configData.data);
       }
+      if (logsData.success) {
+        setLogs(logsData.data);
+      }
     } catch (error) {
       console.error('Failed to fetch data:', error);
     } finally {
       setIsLoading(false);
     }
-  }, [isAuthenticated, authEnabled]);
+  }, []);
 
+  // Check auth status on mount
   useEffect(() => {
-    if (authChecked && (isAuthenticated || !authEnabled)) {
-      fetchData();
-    }
-  }, [fetchData, isAuthenticated, authEnabled, authChecked]);
+    const checkAuth = async () => {
+      try {
+        const res = await fetch('/api/auth');
+        const data = await res.json();
+        setIsAuthenticated(data.authenticated);
+      } catch (error) {
+        console.error('Auth check failed:', error);
+      }
+    };
+    checkAuth();
+    fetchData();
+  }, [fetchData]);
 
+  // Auto-refresh
   useEffect(() => {
-    if (!autoRefresh || (!isAuthenticated && authEnabled) || !authChecked) return;
+    if (!autoRefresh) return;
     const interval = setInterval(fetchData, 10000);
     return () => clearInterval(interval);
-  }, [autoRefresh, fetchData, isAuthenticated, authEnabled, authChecked]);
+  }, [autoRefresh, fetchData]);
 
   // Start/stop detection
   const toggleDetection = async (platform: Platform, start: boolean) => {
@@ -270,8 +140,58 @@ export default function Dashboard() {
     }
   };
 
-  // Update config
+  // Login handler
+  const handleLogin = async (password: string) => {
+    setIsLoggingIn(true);
+    try {
+      const res = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'login', password }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setIsAuthenticated(true);
+        setShowLoginModal(false);
+        toast.success('Logged in successfully');
+        if (pendingAutoTradeEnable) {
+          setPendingAutoTradeEnable(false);
+          await updateConfig({ autoTradeEnabled: true });
+        }
+      } else {
+        toast.error(data.error || 'Invalid password');
+      }
+    } catch (error) {
+      toast.error('Login failed');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  // Logout
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'logout' }),
+      });
+      setIsAuthenticated(false);
+      toast.success('Logged out');
+    } catch (error) {
+      toast.error('Logout failed');
+    }
+  };
+
+  // Update config - requires auth for auto-trade settings
   const updateConfig = async (updates: any, platform?: Platform) => {
+    // If enabling auto-trade, require auth
+    if (updates.autoTradeEnabled === true && !isAuthenticated) {
+      setPendingAutoTradeEnable(true);
+      setShowLoginModal(true);
+      return;
+    }
+
     try {
       const res = await fetch('/api/config', {
         method: 'PUT',
@@ -303,16 +223,7 @@ export default function Dashboard() {
     return 'bg-green-500';
   };
 
-
-  if (!authChecked) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-background">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
-      </div>
-    );
-  }
-
-  if (isLoading && (isAuthenticated || !authEnabled)) {
+  if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-background">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
@@ -322,12 +233,43 @@ export default function Dashboard() {
 
   return (
     <>
-      {/* Login Modal */}
-      <LoginModal 
-        isOpen={showLoginModal} 
-        onLogin={handleLogin} 
-        isLoggingIn={isLoggingIn} 
- />
+      {/* Login Modal - only for auto-trading */}
+      <Dialog open={showLoginModal} onOpenChange={setShowLoginModal}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Authentication Required</DialogTitle>
+            <DialogDescription>
+              Enter password to enable auto-trading features.
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={(e) => {
+            e.preventDefault();
+            const password = (document.getElementById('login-password') as HTMLInputElement)?.value;
+            handleLogin(password);
+          }}>
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label htmlFor="login-password">Password</Label>
+                <Input
+                  id="login-password"
+                  type="password"
+                  placeholder="Enter password"
+                  autoFocus
+                  autoComplete="current-password"
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setShowLoginModal(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={isLoggingIn}>
+                {isLoggingIn ? 'Logging in...' : 'Login'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <div className="container mx-auto p-4 max-w-7xl bg-background min-h-screen">
         <div className="flex items-center justify-between mb-6">
@@ -347,9 +289,13 @@ export default function Dashboard() {
             <Button onClick={fetchData} variant="outline" size="sm">
               Refresh Now
             </Button>
-            {authEnabled && isAuthenticated && (
+            {isAuthenticated ? (
               <Button onClick={handleLogout} variant="destructive" size="sm">
                 Logout
+              </Button>
+            ) : (
+              <Button onClick={() => setShowLoginModal(true)} variant="outline" size="sm">
+                Login (for Auto-Trade)
               </Button>
             )}
           </div>
@@ -677,6 +623,11 @@ export default function Dashboard() {
                         <span className="uppercase">[{log.type}]</span> {log.message}
                       </div>
                     ))}
+                    {logs.length === 0 && (
+                      <div className="text-center text-muted-foreground p-4">
+                        No logs available
+                      </div>
+                    )}
                   </div>
                 </ScrollArea>
               </CardContent>
@@ -694,7 +645,10 @@ export default function Dashboard() {
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="flex items-center justify-between">
-                    <Label htmlFor="auto-trade">Auto-Trade Enabled</Label>
+                    <div>
+                      <Label htmlFor="auto-trade">Auto-Trade Enabled</Label>
+                      <p className="text-xs text-muted-foreground">Requires login to enable</p>
+                    </div>
                     <Switch
                       id="auto-trade"
                       checked={config?.global?.autoTradeEnabled}
@@ -864,25 +818,17 @@ export default function Dashboard() {
                         onClick={async () => {
                           const botToken = (document.getElementById('telegram-bot-token') as HTMLInputElement)?.value;
                           const chatId = (document.getElementById('telegram-chat-id') as HTMLInputElement)?.value;
-                          
                           if (!botToken || !chatId) {
                             toast.error('Please enter both bot token and chat ID');
                             return;
                           }
-                          
                           const res = await fetch('/api/notifications', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                              action: 'configure',
-                              type: 'telegram',
-                              config: { botToken, chatId },
-                            }),
+                            body: JSON.stringify({ action: 'configure', type: 'telegram', config: { botToken, chatId } }),
                           });
                           const data = await res.json();
-                          toast[data.success ? 'success' : 'error'](
-                            data.success ? 'Telegram settings saved!' : data.error
-                          );
+                          toast[data.success ? 'success' : 'error'](data.success ? 'Telegram settings saved!' : data.error);
                         }}
                       >
                         Save Settings
@@ -895,9 +841,7 @@ export default function Dashboard() {
                             body: JSON.stringify({ action: 'test', type: 'telegram' }),
                           });
                           const data = await res.json();
-                          toast[data.success ? 'success' : 'error'](
-                            data.success ? 'Test notification sent!' : data.error
-                          );
+                          toast[data.success ? 'success' : 'error'](data.success ? 'Test notification sent!' : data.error);
                         }}
                       >
                         Send Test
@@ -925,25 +869,17 @@ export default function Dashboard() {
                         variant="outline"
                         onClick={async () => {
                           const webhookUrl = (document.getElementById('discord-webhook') as HTMLInputElement)?.value;
-                          
                           if (!webhookUrl) {
                             toast.error('Please enter a webhook URL');
                             return;
                           }
-                          
                           const res = await fetch('/api/notifications', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                              action: 'configure',
-                              type: 'discord',
-                              config: { webhookUrl },
-                            }),
+                            body: JSON.stringify({ action: 'configure', type: 'discord', config: { webhookUrl } }),
                           });
                           const data = await res.json();
-                          toast[data.success ? 'success' : 'error'](
-                            data.success ? 'Discord settings saved!' : data.error
-                          );
+                          toast[data.success ? 'success' : 'error'](data.success ? 'Discord settings saved!' : data.error);
                         }}
                       >
                         Save Settings
@@ -956,9 +892,7 @@ export default function Dashboard() {
                             body: JSON.stringify({ action: 'test', type: 'discord' }),
                           });
                           const data = await res.json();
-                          toast[data.success ? 'success' : 'error'](
-                            data.success ? 'Test notification sent!' : data.error
-                          );
+                          toast[data.success ? 'success' : 'error'](data.success ? 'Test notification sent!' : data.error);
                         }}
                       >
                         Send Test
@@ -986,25 +920,17 @@ export default function Dashboard() {
                         variant="outline"
                         onClick={async () => {
                           const webhookUrl = (document.getElementById('slack-webhook') as HTMLInputElement)?.value;
-                          
                           if (!webhookUrl) {
                             toast.error('Please enter a webhook URL');
                             return;
                           }
-                          
                           const res = await fetch('/api/notifications', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                              action: 'configure',
-                              type: 'slack',
-                              config: { webhookUrl },
-                            }),
+                            body: JSON.stringify({ action: 'configure', type: 'slack', config: { webhookUrl } }),
                           });
                           const data = await res.json();
-                          toast[data.success ? 'success' : 'error'](
-                            data.success ? 'Slack settings saved!' : data.error
-                          );
+                          toast[data.success ? 'success' : 'error'](data.success ? 'Slack settings saved!' : data.error);
                         }}
                       >
                         Save Settings
@@ -1017,9 +943,7 @@ export default function Dashboard() {
                             body: JSON.stringify({ action: 'test', type: 'slack' }),
                           });
                           const data = await res.json();
-                          toast[data.success ? 'success' : 'error'](
-                            data.success ? 'Test notification sent!' : data.error
-                          );
+                          toast[data.success ? 'success' : 'error'](data.success ? 'Test notification sent!' : data.error);
                         }}
                       >
                         Send Test

@@ -836,7 +836,7 @@ export default function Dashboard() {
             <Card>
               <CardHeader>
                 <CardTitle>Notification Settings</CardTitle>
-                <CardDescription>Configure how you receive alerts</CardDescription>
+                <CardDescription>Configure how you receive alerts. Save settings before testing.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
                 {/* Telegram */}
@@ -847,28 +847,62 @@ export default function Dashboard() {
                       <Label>Bot Token</Label>
                       <Input
                         type="password"
+                        id="telegram-bot-token"
                         placeholder="Enter your Telegram bot token"
                       />
                     </div>
                     <div className="space-y-2">
                       <Label>Chat ID</Label>
-                      <Input placeholder="Enter your Telegram chat ID" />
+                      <Input
+                        id="telegram-chat-id"
+                        placeholder="Enter your Telegram chat ID"
+                      />
                     </div>
-                    <Button
-                      onClick={async () => {
-                        const res = await fetch('/api/notifications', {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ action: 'test', type: 'telegram' }),
-                        });
-                        const data = await res.json();
-                        toast[data.success ? 'success' : 'error'](
-                          data.success ? 'Test notification sent!' : data.error
-                        );
-                      }}
-                    >
-                      Send Test Notification
-                    </Button>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          const botToken = (document.getElementById('telegram-bot-token') as HTMLInputElement)?.value;
+                          const chatId = (document.getElementById('telegram-chat-id') as HTMLInputElement)?.value;
+                          
+                          if (!botToken || !chatId) {
+                            toast.error('Please enter both bot token and chat ID');
+                            return;
+                          }
+                          
+                          const res = await fetch('/api/notifications', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              action: 'configure',
+                              type: 'telegram',
+                              config: { botToken, chatId },
+                            }),
+                          });
+                          const data = await res.json();
+                          toast[data.success ? 'success' : 'error'](
+                            data.success ? 'Telegram settings saved!' : data.error
+                          );
+                        }}
+                      >
+                        Save Settings
+                      </Button>
+                      <Button
+                        onClick={async () => {
+                          const res = await fetch('/api/notifications', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ action: 'test', type: 'telegram' }),
+                          });
+                          const data = await res.json();
+                          toast[data.success ? 'success' : 'error'](
+                            data.success ? 'Test notification sent!' : data.error
+                          );
+                        }}
+                      >
+                        Send Test
+                      </Button>
+                    </div>
                   </div>
                 </div>
 
@@ -882,24 +916,54 @@ export default function Dashboard() {
                       <Label>Webhook URL</Label>
                       <Input
                         type="password"
-                        placeholder="Enter your Discord webhook URL"
+                        id="discord-webhook"
+                        placeholder="https://discord.com/api/webhooks/..."
                       />
                     </div>
-                    <Button
-                      onClick={async () => {
-                        const res = await fetch('/api/notifications', {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ action: 'test', type: 'discord' }),
-                        });
-                        const data = await res.json();
-                        toast[data.success ? 'success' : 'error'](
-                          data.success ? 'Test notification sent!' : data.error
-                        );
-                      }}
-                    >
-                      Send Test Notification
-                    </Button>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          const webhookUrl = (document.getElementById('discord-webhook') as HTMLInputElement)?.value;
+                          
+                          if (!webhookUrl) {
+                            toast.error('Please enter a webhook URL');
+                            return;
+                          }
+                          
+                          const res = await fetch('/api/notifications', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              action: 'configure',
+                              type: 'discord',
+                              config: { webhookUrl },
+                            }),
+                          });
+                          const data = await res.json();
+                          toast[data.success ? 'success' : 'error'](
+                            data.success ? 'Discord settings saved!' : data.error
+                          );
+                        }}
+                      >
+                        Save Settings
+                      </Button>
+                      <Button
+                        onClick={async () => {
+                          const res = await fetch('/api/notifications', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ action: 'test', type: 'discord' }),
+                          });
+                          const data = await res.json();
+                          toast[data.success ? 'success' : 'error'](
+                            data.success ? 'Test notification sent!' : data.error
+                          );
+                        }}
+                      >
+                        Send Test
+                      </Button>
+                    </div>
                   </div>
                 </div>
 
@@ -913,24 +977,54 @@ export default function Dashboard() {
                       <Label>Webhook URL</Label>
                       <Input
                         type="password"
-                        placeholder="Enter your Slack webhook URL"
+                        id="slack-webhook"
+                        placeholder="https://hooks.slack.com/services/..."
                       />
                     </div>
-                    <Button
-                      onClick={async () => {
-                        const res = await fetch('/api/notifications', {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ action: 'test', type: 'slack' }),
-                        });
-                        const data = await res.json();
-                        toast[data.success ? 'success' : 'error'](
-                          data.success ? 'Test notification sent!' : data.error
-                        );
-                      }}
-                    >
-                      Send Test Notification
-                    </Button>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          const webhookUrl = (document.getElementById('slack-webhook') as HTMLInputElement)?.value;
+                          
+                          if (!webhookUrl) {
+                            toast.error('Please enter a webhook URL');
+                            return;
+                          }
+                          
+                          const res = await fetch('/api/notifications', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              action: 'configure',
+                              type: 'slack',
+                              config: { webhookUrl },
+                            }),
+                          });
+                          const data = await res.json();
+                          toast[data.success ? 'success' : 'error'](
+                            data.success ? 'Slack settings saved!' : data.error
+                          );
+                        }}
+                      >
+                        Save Settings
+                      </Button>
+                      <Button
+                        onClick={async () => {
+                          const res = await fetch('/api/notifications', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ action: 'test', type: 'slack' }),
+                          });
+                          const data = await res.json();
+                          toast[data.success ? 'success' : 'error'](
+                            data.success ? 'Test notification sent!' : data.error
+                          );
+                        }}
+                      >
+                        Send Test
+                      </Button>
+                    </div>
                   </div>
                 </div>
               </CardContent>

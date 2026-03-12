@@ -66,7 +66,7 @@ async function testKalshi(): Promise<TestResult> {
   
   try {
     // Test the public markets endpoint
-    const response = await fetch('https://trading-api.kalshi.com/markets?limit=5&status=open', {
+    const response = await fetch('https://api.elections.kalshi.com/trade-api/v2/series/KXHIGHNY', {
       method: 'GET',
       headers: {
         'Accept': 'application/json',

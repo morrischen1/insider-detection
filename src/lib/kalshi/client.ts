@@ -13,7 +13,7 @@ import type {
   Outcome,
 } from '@/types';
 
-const KALSHI_API_BASE = 'https://trading-api.kalshi.com';
+const KALSHI_API_BASE = 'https://api.elections.kalshi.com/trade-api/v2';
 
 interface FetchOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE';

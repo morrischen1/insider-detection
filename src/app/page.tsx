@@ -216,11 +216,12 @@ export default function Dashboard() {
     // Fetch data regardless of auth status - dashboard is public
 
     try {
-      const [statusRes, statsRes, watchlistRes, configRes] = await Promise.all([
+      const [statusRes, statsRes, watchlistRes, configRes, logsRes] = await Promise.all([
         fetch('/api/detection/status'),
         fetch('/api/stats'),
         fetch('/api/watchlist?limit=20'),
         fetch('/api/config'),
+        fetch('/api/logs?limit=100'),
       ]);
 
       // Handle 401 responses - but only if we didn't just log in
@@ -243,11 +244,12 @@ export default function Dashboard() {
         }
       };
 
-      const [status, statsData, watchlistData, configData] = await Promise.all([
+      const [status, statsData, watchlistData, configData, logsData] = await Promise.all([
         safeParseJson(statusRes, 'status'),
         safeParseJson(statsRes, 'stats'),
         safeParseJson(watchlistRes, 'watchlist'),
         safeParseJson(configRes, 'config'),
+        safeParseJson(logsRes, 'logs'),
       ]);
 
       if (status?.success) {
@@ -269,6 +271,9 @@ export default function Dashboard() {
       }
       if (configData?.success) {
         setConfig(configData.data);
+      }
+      if (logsData?.success) {
+        setLogs(logsData.data || []);
       }
     } catch (error) {
       console.error('Failed to fetch data:', error);

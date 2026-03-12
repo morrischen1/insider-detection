@@ -3,7 +3,7 @@
  * Logs API calls to the database and sends error notifications
  */
 
-import { apiLogs, db } from '@/lib/db';
+import { apiLogs, db, detectionLogs } from '@/lib/db';
 import { sendNotification } from '@/lib/notifications';
 import type { Platform } from '@/types';
 
@@ -31,8 +31,33 @@ export function logApiCall(entry: ApiLogEntry): void {
       errorMessage: entry.errorMessage,
     });
 
-    // Send notification for API errors
+    // Log errors to detection_logs as well (so they show in dashboard)
     if (entry.status >= 400 || entry.errorMessage) {
+      // Log to detection_logs for dashboard visibility
+      try {
+        const id = crypto.randomUUID();
+        db.prepare(`
+          INSERT INTO detection_logs (id, platform, type, message, details, timestamp)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(
+          id,
+          entry.platform,
+          'error',
+          `API Error: ${entry.method} ${entry.endpoint} - Status ${entry.status}`,
+          JSON.stringify({
+            endpoint: entry.endpoint,
+            method: entry.method,
+            status: entry.status,
+            errorMessage: entry.errorMessage,
+            responseTime: entry.responseTime,
+          }),
+          Date.now()
+        );
+      } catch (e) {
+        console.error('Failed to log API error to detection_logs:', e);
+      }
+      
+      // Send notification via webhook
       sendApiErrorNotification(entry);
     }
   } catch (error) {

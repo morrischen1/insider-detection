@@ -47,8 +47,11 @@ export async function evaluateAccountAge(context: EvaluationContext): Promise<nu
 export async function evaluateTradeSize(context: EvaluationContext): Promise<number> {
   const { trade, market, config } = context;
 
+  // Avoid division by zero
+  const liquidity = market.liquidity || 1;
+  
   // Calculate percentage of market liquidity
-  const liquidityPercentage = (trade.usdValue / market.liquidity) * 100;
+  const liquidityPercentage = (trade.usdValue / liquidity) * 100;
 
   // Check if trade exceeds thresholds
   const exceedsUsdThreshold = trade.usdValue >= config.bigTradeUsdThreshold;
@@ -120,30 +123,29 @@ export async function evaluateTimingPrecision(context: EvaluationContext): Promi
  * Historical accuracy on large trades (>70% is suspicious)
  */
 export async function evaluateWinRateOnBigBets(context: EvaluationContext): Promise<number> {
-  const { account, trade, platform } = context;
+  const { account, trade } = context;
 
   if (!account.winRate) {
     return 0;
   }
 
-  // Get historical trades for this account
-  const historicalTrades = await db.trade.findMany({
-    where: {
-      accountId: account.id,
-      usdValue: { gte: context.config.bigTradeUsdThreshold },
-    },
-    take: 50,
-    orderBy: { timestamp: 'desc' },
-  });
-
-  if (historicalTrades.length < 3) {
-    // Not enough history
+  // Get historical trades for this account using raw SQL
+  try {
+    const stmt = db.prepare(`
+      SELECT COUNT(*) as count 
+      FROM trades 
+      WHERE account_id = ? AND usd_value >= ?
+    `);
+    const result = stmt.get(account.id, context.config.bigTradeUsdThreshold) as { count: number };
+    
+    if (result.count < 3) {
+      // Not enough history
+      return 0;
+    }
+  } catch (e) {
+    // If we can't check, skip this criterion
     return 0;
   }
-
-  // Calculate win rate on big bets
-  // We would need resolved market data to calculate this properly
-  // For now, use the account's overall win rate
 
   const winRate = account.winRate;
 
@@ -201,13 +203,6 @@ export async function evaluateFirstMarketActivity(context: EvaluationContext): P
 export async function evaluateMarketKnowledge(context: EvaluationContext): Promise<number> {
   const { trade, market, account } = context;
 
-  // Check if betting on the less popular outcome
-  // This requires holder data which we'd need to fetch
-
-  // For now, evaluate based on:
-  // 1. Confidence in position (large position on one side)
-  // 2. Market obscurity (lower volume markets)
-
   let score = 0;
 
   // Market obscurity - lower volume = more obscure
@@ -218,7 +213,8 @@ export async function evaluateMarketKnowledge(context: EvaluationContext): Promi
   }
 
   // Large position size shows high confidence
-  const positionPercentOfLiquidity = (trade.usdValue / market.liquidity) * 100;
+  const liquidity = market.liquidity || 1;
+  const positionPercentOfLiquidity = (trade.usdValue / liquidity) * 100;
   if (positionPercentOfLiquidity > 5) {
     score += 40;
   } else if (positionPercentOfLiquidity > 2) {
@@ -238,12 +234,10 @@ export async function evaluateMarketKnowledge(context: EvaluationContext): Promi
  * Large bets that significantly move the market
  */
 export async function evaluatePriceMovement(context: EvaluationContext): Promise<number> {
-  const { trade, market, platform } = context;
+  const { trade, market } = context;
 
-  // We'd need price history before/after the trade
-  // For now, estimate based on trade size vs liquidity
-
-  const liquidityRatio = trade.usdValue / market.liquidity;
+  const liquidity = market.liquidity || 1;
+  const liquidityRatio = trade.usdValue / liquidity;
 
   // Larger trades relative to liquidity cause more price movement
   if (liquidityRatio > 0.2) {
@@ -266,58 +260,67 @@ export async function evaluatePriceMovement(context: EvaluationContext): Promise
 export async function evaluateBehavioralPattern(context: EvaluationContext): Promise<number> {
   const { trade, account, platform } = context;
 
-  // Look for similar trades in the same market around the same time
-  const timeWindow = 5 * 60 * 1000; // 5 minutes
-  const startTime = new Date(trade.timestamp.getTime() - timeWindow);
-  const endTime = new Date(trade.timestamp.getTime() + timeWindow);
+  try {
+    // Look for similar trades in the same market around the same time
+    const timeWindow = 5 * 60 * 1000; // 5 minutes
+    const startTime = trade.timestamp.getTime() - timeWindow;
+    const endTime = trade.timestamp.getTime() + timeWindow;
 
-  const similarTrades = await db.trade.findMany({
-    where: {
+    const stmt = db.prepare(`
+      SELECT t.*, a.first_seen as account_first_seen
+      FROM trades t
+      JOIN accounts a ON t.account_id = a.id
+      WHERE t.platform = ?
+        AND t.market_id = ?
+        AND t.outcome = ?
+        AND t.timestamp >= ?
+        AND t.timestamp <= ?
+        AND t.account_id != ?
+    `);
+    
+    const similarTrades = stmt.all(
       platform,
-      marketId: trade.marketId,
-      outcome: trade.outcome,
-      timestamp: {
-        gte: startTime,
-        lte: endTime,
-      },
-      accountId: { not: account.id },
-    },
-    include: {
-      account: true,
-    },
-  });
+      trade.marketId,
+      trade.outcome,
+      startTime,
+      endTime,
+      account.id
+    ) as any[];
 
-  if (similarTrades.length === 0) {
+    if (similarTrades.length === 0) {
+      return 0;
+    }
+
+    // Check for similar sized trades
+    const similarSizedTrades = similarTrades.filter(
+      t => Math.abs(t.usd_value - trade.usdValue) / trade.usdValue < 0.2
+    );
+
+    if (similarSizedTrades.length >= 3) {
+      return 100;
+    } else if (similarSizedTrades.length >= 2) {
+      return 80;
+    } else if (similarSizedTrades.length >= 1) {
+      return 50;
+    }
+
+    // Check for new accounts among similar traders
+    const newAccountTrades = similarTrades.filter(t => {
+      const age = Date.now() - t.account_first_seen;
+      return age < 30 * 24 * 60 * 60 * 1000; // 30 days
+    });
+
+    if (newAccountTrades.length >= 2) {
+      return 70;
+    } else if (newAccountTrades.length >= 1) {
+      return 40;
+    }
+
+    return 10;
+  } catch (e) {
+    console.error('Error evaluating behavioral pattern:', e);
     return 0;
   }
-
-  // Check for similar sized trades
-  const similarSizedTrades = similarTrades.filter(
-    t => Math.abs(t.usdValue - trade.usdValue) / trade.usdValue < 0.2
-  );
-
-  if (similarSizedTrades.length >= 3) {
-    // Multiple similar trades from different accounts - highly suspicious
-    return 100;
-  } else if (similarSizedTrades.length >= 2) {
-    return 80;
-  } else if (similarSizedTrades.length >= 1) {
-    return 50;
-  }
-
-  // Check for new accounts among similar traders
-  const newAccountTrades = similarTrades.filter(t => {
-    const age = Date.now() - t.account.firstSeen.getTime();
-    return age < 30 * 24 * 60 * 60 * 1000; // 30 days
-  });
-
-  if (newAccountTrades.length >= 2) {
-    return 70;
-  } else if (newAccountTrades.length >= 1) {
-    return 40;
-  }
-
-  return 10;
 }
 
 /**
@@ -352,16 +355,20 @@ export async function evaluatePreviousWatchlist(context: EvaluationContext): Pro
     return 100;
   }
 
-  // Check if account was previously on watchlist but removed
-  const previousFlags = await db.watchlist.findMany({
-    where: {
-      accountId: account.id,
-      isActive: false,
-    },
-  });
+  try {
+    // Check if account was previously on watchlist but removed
+    const stmt = db.prepare(`
+      SELECT COUNT(*) as count 
+      FROM watchlist 
+      WHERE account_id = ? AND is_active = 0
+    `);
+    const result = stmt.get(account.id) as { count: number };
 
-  if (previousFlags.length > 0) {
-    return 80;
+    if (result.count > 0) {
+      return 80;
+    }
+  } catch (e) {
+    console.error('Error checking previous watchlist:', e);
   }
 
   return 0;

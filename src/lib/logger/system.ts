@@ -1,10 +1,15 @@
 /**
  * System Logger
- * Logs system activity to the database
+ * Logs system activity to the database and sends error notifications
  */
 
 import { detectionLogs } from '@/lib/db';
+import { sendNotification } from '@/lib/notifications';
 import type { Platform, LogType } from '@/types';
+
+// Track recent system error notifications to prevent spam
+const recentSystemErrorNotifications = new Map<string, Date>();
+const SYSTEM_ERROR_NOTIFICATION_COOLDOWN = 5 * 60 * 1000; // 5 minutes
 
 interface LogEntry {
   platform: Platform;
@@ -21,8 +26,53 @@ export function logDetection(entry: LogEntry): void {
       message: entry.message,
       details: entry.details,
     });
+
+    // Send notification for system errors
+    if (entry.type === 'error') {
+      sendSystemErrorNotification(entry);
+    }
   } catch (error) {
     console.error('Failed to log detection:', error);
+  }
+}
+
+/**
+ * Send notification for system errors via webhook
+ */
+async function sendSystemErrorNotification(entry: LogEntry): Promise<void> {
+  const errorKey = `${entry.platform}-${entry.message.slice(0, 50)}`;
+  const now = new Date();
+  
+  // Check cooldown to prevent spam
+  const lastNotification = recentSystemErrorNotifications.get(errorKey);
+  if (lastNotification && now.getTime() - lastNotification.getTime() < SYSTEM_ERROR_NOTIFICATION_COOLDOWN) {
+    return;
+  }
+  
+  recentSystemErrorNotifications.set(errorKey, now);
+  
+  // Clean up old entries
+  for (const [key, timestamp] of recentSystemErrorNotifications.entries()) {
+    if (now.getTime() - timestamp.getTime() > SYSTEM_ERROR_NOTIFICATION_COOLDOWN * 2) {
+      recentSystemErrorNotifications.delete(key);
+    }
+  }
+  
+  try {
+    await sendNotification({
+      type: 'error',
+      platform: entry.platform,
+      title: 'System Error Detected',
+      message: `${entry.message}${entry.details ? `\nDetails: ${JSON.stringify(entry.details)}` : ''}`,
+      data: {
+        systemError: true,
+        message: entry.message,
+        details: entry.details,
+      },
+      timestamp: now,
+    });
+  } catch (error) {
+    console.error('Failed to send system error notification:', error);
   }
 }
 

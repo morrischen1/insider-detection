@@ -1,10 +1,15 @@
 /**
  * API Logger
- * Logs API calls to the database
+ * Logs API calls to the database and sends error notifications
  */
 
 import { apiLogs, db } from '@/lib/db';
+import { sendNotification } from '@/lib/notifications';
 import type { Platform } from '@/types';
+
+// Track recent error notifications to prevent spam
+const recentErrorNotifications = new Map<string, Date>();
+const ERROR_NOTIFICATION_COOLDOWN = 5 * 60 * 1000; // 5 minutes
 
 interface ApiLogEntry {
   platform: Platform;
@@ -25,8 +30,56 @@ export function logApiCall(entry: ApiLogEntry): void {
       responseTime: entry.responseTime,
       errorMessage: entry.errorMessage,
     });
+
+    // Send notification for API errors
+    if (entry.status >= 400 || entry.errorMessage) {
+      sendApiErrorNotification(entry);
+    }
   } catch (error) {
     console.error('Failed to log API call:', error);
+  }
+}
+
+/**
+ * Send notification for API errors via webhook
+ */
+async function sendApiErrorNotification(entry: ApiLogEntry): Promise<void> {
+  const errorKey = `${entry.platform}-${entry.endpoint}`;
+  const now = new Date();
+  
+  // Check cooldown to prevent spam
+  const lastNotification = recentErrorNotifications.get(errorKey);
+  if (lastNotification && now.getTime() - lastNotification.getTime() < ERROR_NOTIFICATION_COOLDOWN) {
+    return;
+  }
+  
+  recentErrorNotifications.set(errorKey, now);
+  
+  // Clean up old entries
+  for (const [key, timestamp] of recentErrorNotifications.entries()) {
+    if (now.getTime() - timestamp.getTime() > ERROR_NOTIFICATION_COOLDOWN * 2) {
+      recentErrorNotifications.delete(key);
+    }
+  }
+  
+  try {
+    await sendNotification({
+      type: 'error',
+      platform: entry.platform,
+      title: 'API Error Detected',
+      message: `Endpoint: ${entry.method} ${entry.endpoint}\nStatus: ${entry.status}\nError: ${entry.errorMessage || 'Unknown error'}\nResponse Time: ${entry.responseTime}ms`,
+      data: {
+        apiError: true,
+        endpoint: entry.endpoint,
+        method: entry.method,
+        status: entry.status,
+        errorMessage: entry.errorMessage,
+        responseTime: entry.responseTime,
+      },
+      timestamp: now,
+    });
+  } catch (error) {
+    console.error('Failed to send API error notification:', error);
   }
 }
 

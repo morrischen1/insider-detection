@@ -112,8 +112,29 @@ export default function Dashboard() {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   
+  // Local config state for editing (separate from server config)
+  const [localGlobalConfig, setLocalGlobalConfig] = useState<any>({});
+  const [localPolymarketConfig, setLocalPolymarketConfig] = useState<any>({});
+  const [localKalshiConfig, setLocalKalshiConfig] = useState<any>({});
+  const [globalConfigChanged, setGlobalConfigChanged] = useState(false);
+  const [polymarketConfigChanged, setPolymarketConfigChanged] = useState(false);
+  const [kalshiConfigChanged, setKalshiConfigChanged] = useState(false);
+  const [savingConfig, setSavingConfig] = useState<string | null>(null);
+  
   // Track if we just logged in to prevent race conditions
   const justLoggedIn = useRef(false);
+  
+  // Initialize local config when server config is loaded
+  useEffect(() => {
+    if (config) {
+      setLocalGlobalConfig(config.global || {});
+      setLocalPolymarketConfig(config.platforms?.polymarket || {});
+      setLocalKalshiConfig(config.platforms?.kalshi || {});
+      setGlobalConfigChanged(false);
+      setPolymarketConfigChanged(false);
+      setKalshiConfigChanged(false);
+    }
+  }, [config]);
 
   // Check auth status - only once on mount
   useEffect(() => {
@@ -733,8 +754,15 @@ export default function Dashboard() {
               {/* Global Config */}
               <Card>
                 <CardHeader>
-                  <CardTitle>Global Settings</CardTitle>
-                  <CardDescription>System-wide configuration</CardDescription>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <CardTitle>Global Settings</CardTitle>
+                      <CardDescription>System-wide configuration</CardDescription>
+                    </div>
+                    {globalConfigChanged && (
+                      <Badge variant="secondary" className="ml-2">Unsaved Changes</Badge>
+                    )}
+                  </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="flex items-center justify-between">
@@ -746,13 +774,14 @@ export default function Dashboard() {
                     </div>
                     <Switch
                       id="auto-trade"
-                      checked={config?.global?.autoTradeEnabled}
+                      checked={localGlobalConfig?.autoTradeEnabled || false}
                       onCheckedChange={(checked) => {
                         if (checked && !isAuthenticated) {
                           setShowLoginModal(true);
                           return;
                         }
-                        updateConfig({ autoTradeEnabled: checked });
+                        setLocalGlobalConfig((prev: any) => ({ ...prev, autoTradeEnabled: checked }));
+                        setGlobalConfigChanged(true);
                       }}
                     />
                   </div>
@@ -760,19 +789,21 @@ export default function Dashboard() {
                     <Label>Auto-Trade Amount ($)</Label>
                     <Input
                       type="number"
-                      value={config?.global?.autoTradeAmount || 1}
-                      onChange={(e) =>
-                        updateConfig({ autoTradeAmount: parseFloat(e.target.value) })
-                      }
+                      value={localGlobalConfig?.autoTradeAmount ?? 1}
+                      onChange={(e) => {
+                        setLocalGlobalConfig((prev: any) => ({ ...prev, autoTradeAmount: parseFloat(e.target.value) || 0 }));
+                        setGlobalConfigChanged(true);
+                      }}
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label>Probability Threshold: {config?.global?.autoTradeProbabilityThreshold || 70}%</Label>
+                    <Label>Probability Threshold: {localGlobalConfig?.autoTradeProbabilityThreshold ?? 70}%</Label>
                     <Slider
-                      value={[config?.global?.autoTradeProbabilityThreshold || 70]}
-                      onValueChange={([value]) =>
-                        updateConfig({ autoTradeProbabilityThreshold: value })
-                      }
+                      value={[localGlobalConfig?.autoTradeProbabilityThreshold ?? 70]}
+                      onValueChange={([value]) => {
+                        setLocalGlobalConfig((prev: any) => ({ ...prev, autoTradeProbabilityThreshold: value }));
+                        setGlobalConfigChanged(true);
+                      }}
                       min={50}
                       max={100}
                       step={5}
@@ -782,17 +813,21 @@ export default function Dashboard() {
                     <Label>Data Retention (days)</Label>
                     <Input
                       type="number"
-                      value={config?.global?.dataRetentionDays || 365}
-                      onChange={(e) =>
-                        updateConfig({ dataRetentionDays: parseInt(e.target.value) })
-                      }
+                      value={localGlobalConfig?.dataRetentionDays ?? 365}
+                      onChange={(e) => {
+                        setLocalGlobalConfig((prev: any) => ({ ...prev, dataRetentionDays: parseInt(e.target.value) || 365 }));
+                        setGlobalConfigChanged(true);
+                      }}
                     />
                   </div>
                   <div className="space-y-2">
                     <Label>Notification Method</Label>
                     <Select
-                      value={config?.global?.notificationMethod || 'telegram'}
-                      onValueChange={(value) => updateConfig({ notificationMethod: value })}
+                      value={localGlobalConfig?.notificationMethod || 'telegram'}
+                      onValueChange={(value) => {
+                        setLocalGlobalConfig((prev: any) => ({ ...prev, notificationMethod: value }));
+                        setGlobalConfigChanged(true);
+                      }}
                     >
                       <SelectTrigger>
                         <SelectValue />
@@ -805,102 +840,228 @@ export default function Dashboard() {
                       </SelectContent>
                     </Select>
                   </div>
+                  <Button 
+                    className="w-full" 
+                    disabled={!globalConfigChanged || savingConfig === 'global'}
+                    onClick={async () => {
+                      setSavingConfig('global');
+                      await updateConfig(localGlobalConfig);
+                      setGlobalConfigChanged(false);
+                      setSavingConfig(null);
+                    }}
+                  >
+                    {savingConfig === 'global' ? 'Saving...' : 'Save Global Settings'}
+                  </Button>
                 </CardContent>
               </Card>
 
-              {/* Platform Configs */}
-              {['polymarket', 'kalshi'].map((platform) => (
-                <Card key={platform}>
-                  <CardHeader>
-                    <CardTitle className="capitalize">{platform} Settings</CardTitle>
-                    <CardDescription>Platform-specific configuration</CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <Label>Monitoring Enabled</Label>
-                      <Switch
-                        checked={config?.platforms?.[platform as Platform]?.enabled}
-                        onCheckedChange={(checked) =>
-                          updateConfig({ enabled: checked }, platform as Platform)
-                        }
-                      />
+              {/* Polymarket Config */}
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <CardTitle>Polymarket Settings</CardTitle>
+                      <CardDescription>Platform-specific configuration</CardDescription>
                     </div>
-                    <div className="space-y-2">
-                      <Label>Min Market Liquidity ($)</Label>
-                      <Input
-                        type="number"
-                        value={config?.platforms?.[platform as Platform]?.minMarketLiquidity || 10000}
-                        onChange={(e) =>
-                          updateConfig(
-                            { minMarketLiquidity: parseFloat(e.target.value) },
-                            platform as Platform
-                          )
-                        }
-                      />
+                    {polymarketConfigChanged && (
+                      <Badge variant="secondary" className="ml-2">Unsaved Changes</Badge>
+                    )}
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <Label>Monitoring Enabled</Label>
+                    <Switch
+                      checked={localPolymarketConfig?.enabled ?? true}
+                      onCheckedChange={(checked) => {
+                        setLocalPolymarketConfig((prev: any) => ({ ...prev, enabled: checked }));
+                        setPolymarketConfigChanged(true);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Min Market Liquidity ($)</Label>
+                    <Input
+                      type="number"
+                      value={localPolymarketConfig?.minMarketLiquidity ?? 10000}
+                      onChange={(e) => {
+                        setLocalPolymarketConfig((prev: any) => ({ ...prev, minMarketLiquidity: parseFloat(e.target.value) || 0 }));
+                        setPolymarketConfigChanged(true);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Big Trade Threshold ($)</Label>
+                    <Input
+                      type="number"
+                      value={localPolymarketConfig?.bigTradeUsdThreshold ?? 1000}
+                      onChange={(e) => {
+                        setLocalPolymarketConfig((prev: any) => ({ ...prev, bigTradeUsdThreshold: parseFloat(e.target.value) || 0 }));
+                        setPolymarketConfigChanged(true);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Big Trade % Threshold</Label>
+                    <Input
+                      type="number"
+                      step="0.5"
+                      value={localPolymarketConfig?.bigTradePercentThreshold ?? 2}
+                      onChange={(e) => {
+                        setLocalPolymarketConfig((prev: any) => ({ ...prev, bigTradePercentThreshold: parseFloat(e.target.value) || 0 }));
+                        setPolymarketConfigChanged(true);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Polling Interval (seconds)</Label>
+                    <Input
+                      type="number"
+                      value={localPolymarketConfig?.pollingInterval ?? 10}
+                      onChange={(e) => {
+                        setLocalPolymarketConfig((prev: any) => ({ ...prev, pollingInterval: parseInt(e.target.value) || 10 }));
+                        setPolymarketConfigChanged(true);
+                      }}
+                    />
+                  </div>
+                  <Separator className="my-4" />
+                  <div className="space-y-2">
+                    <Label>API Connection</Label>
+                    <p className="text-sm text-muted-foreground">Test the connection to Polymarket's API servers.</p>
+                    <Button
+                      variant="outline"
+                      onClick={() => testPlatformApi('polymarket')}
+                      disabled={testingPlatform === 'polymarket'}
+                      className="w-full"
+                    >
+                      {testingPlatform === 'polymarket' ? (
+                        <>
+                          <span className="animate-spin mr-2">⏳</span>
+                          Testing...
+                        </>
+                      ) : (
+                        <>🧪 Test API Connection</>
+                      )}
+                    </Button>
+                  </div>
+                  <Button 
+                    className="w-full" 
+                    disabled={!polymarketConfigChanged || savingConfig === 'polymarket'}
+                    onClick={async () => {
+                      setSavingConfig('polymarket');
+                      await updateConfig(localPolymarketConfig, 'polymarket');
+                      setPolymarketConfigChanged(false);
+                      setSavingConfig(null);
+                    }}
+                  >
+                    {savingConfig === 'polymarket' ? 'Saving...' : 'Save Polymarket Settings'}
+                  </Button>
+                </CardContent>
+              </Card>
+
+              {/* Kalshi Config */}
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <CardTitle>Kalshi Settings</CardTitle>
+                      <CardDescription>Platform-specific configuration</CardDescription>
                     </div>
-                    <div className="space-y-2">
-                      <Label>Big Trade Threshold ($)</Label>
-                      <Input
-                        type="number"
-                        value={config?.platforms?.[platform as Platform]?.bigTradeUsdThreshold || 1000}
-                        onChange={(e) =>
-                          updateConfig(
-                            { bigTradeUsdThreshold: parseFloat(e.target.value) },
-                            platform as Platform
-                          )
-                        }
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Big Trade % Threshold</Label>
-                      <Input
-                        type="number"
-                        step="0.5"
-                        value={config?.platforms?.[platform as Platform]?.bigTradePercentThreshold || 2}
-                        onChange={(e) =>
-                          updateConfig(
-                            { bigTradePercentThreshold: parseFloat(e.target.value) },
-                            platform as Platform
-                          )
-                        }
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Polling Interval (seconds)</Label>
-                      <Input
-                        type="number"
-                        value={config?.platforms?.[platform as Platform]?.pollingInterval || 10}
-                        onChange={(e) =>
-                          updateConfig(
-                            { pollingInterval: parseInt(e.target.value) },
-                            platform as Platform
-                          )
-                        }
-                      />
-                    </div>
-                    <Separator className="my-4" />
-                    <div className="space-y-2">
-                      <Label>API Connection</Label>
-                      <p className="text-sm text-muted-foreground">Test the connection to {platform}'s API servers.</p>
-                      <Button
-                        variant="outline"
-                        onClick={() => testPlatformApi(platform as Platform)}
-                        disabled={testingPlatform === platform}
-                        className="w-full"
-                      >
-                        {testingPlatform === platform ? (
-                          <>
-                            <span className="animate-spin mr-2">⏳</span>
-                            Testing...
-                          </>
-                        ) : (
-                          <>🧪 Test API Connection</>
-                        )}
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
+                    {kalshiConfigChanged && (
+                      <Badge variant="secondary" className="ml-2">Unsaved Changes</Badge>
+                    )}
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <Label>Monitoring Enabled</Label>
+                    <Switch
+                      checked={localKalshiConfig?.enabled ?? true}
+                      onCheckedChange={(checked) => {
+                        setLocalKalshiConfig((prev: any) => ({ ...prev, enabled: checked }));
+                        setKalshiConfigChanged(true);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Min Market Liquidity ($)</Label>
+                    <Input
+                      type="number"
+                      value={localKalshiConfig?.minMarketLiquidity ?? 10000}
+                      onChange={(e) => {
+                        setLocalKalshiConfig((prev: any) => ({ ...prev, minMarketLiquidity: parseFloat(e.target.value) || 0 }));
+                        setKalshiConfigChanged(true);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Big Trade Threshold ($)</Label>
+                    <Input
+                      type="number"
+                      value={localKalshiConfig?.bigTradeUsdThreshold ?? 1000}
+                      onChange={(e) => {
+                        setLocalKalshiConfig((prev: any) => ({ ...prev, bigTradeUsdThreshold: parseFloat(e.target.value) || 0 }));
+                        setKalshiConfigChanged(true);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Big Trade % Threshold</Label>
+                    <Input
+                      type="number"
+                      step="0.5"
+                      value={localKalshiConfig?.bigTradePercentThreshold ?? 2}
+                      onChange={(e) => {
+                        setLocalKalshiConfig((prev: any) => ({ ...prev, bigTradePercentThreshold: parseFloat(e.target.value) || 0 }));
+                        setKalshiConfigChanged(true);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Polling Interval (seconds)</Label>
+                    <Input
+                      type="number"
+                      value={localKalshiConfig?.pollingInterval ?? 10}
+                      onChange={(e) => {
+                        setLocalKalshiConfig((prev: any) => ({ ...prev, pollingInterval: parseInt(e.target.value) || 10 }));
+                        setKalshiConfigChanged(true);
+                      }}
+                    />
+                  </div>
+                  <Separator className="my-4" />
+                  <div className="space-y-2">
+                    <Label>API Connection</Label>
+                    <p className="text-sm text-muted-foreground">Test the connection to Kalshi's API servers.</p>
+                    <Button
+                      variant="outline"
+                      onClick={() => testPlatformApi('kalshi')}
+                      disabled={testingPlatform === 'kalshi'}
+                      className="w-full"
+                    >
+                      {testingPlatform === 'kalshi' ? (
+                        <>
+                          <span className="animate-spin mr-2">⏳</span>
+                          Testing...
+                        </>
+                      ) : (
+                        <>🧪 Test API Connection</>
+                      )}
+                    </Button>
+                  </div>
+                  <Button 
+                    className="w-full" 
+                    disabled={!kalshiConfigChanged || savingConfig === 'kalshi'}
+                    onClick={async () => {
+                      setSavingConfig('kalshi');
+                      await updateConfig(localKalshiConfig, 'kalshi');
+                      setKalshiConfigChanged(false);
+                      setSavingConfig(null);
+                    }}
+                  >
+                    {savingConfig === 'kalshi' ? 'Saving...' : 'Save Kalshi Settings'}
+                  </Button>
+                </CardContent>
+              </Card>
             </div>
           </TabsContent>
 
@@ -1092,6 +1253,87 @@ export default function Dashboard() {
                           const data = await res.json();
                           toast[data.success ? 'success' : 'error'](
                             data.success ? 'Test notification sent!' : data.error
+                          );
+                        }}
+                      >
+                        Send Test
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                <Separator />
+
+                {/* Custom Webhook */}
+                <div className="space-y-4">
+                  <h3 className="text-lg font-semibold">Custom Webhook</h3>
+                  <p className="text-sm text-muted-foreground">Receive notifications for system errors and API failures via custom webhook.</p>
+                  <div className="grid gap-4">
+                    <div className="space-y-2">
+                      <Label>Webhook URL</Label>
+                      <Input
+                        type="password"
+                        id="custom-webhook-url"
+                        placeholder="https://your-server.com/webhook"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Custom Headers (JSON, optional)</Label>
+                      <Input
+                        id="custom-webhook-headers"
+                        placeholder='{"Authorization": "Bearer token"}'
+                      />
+                      <p className="text-xs text-muted-foreground">JSON object with custom headers to include in webhook requests</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          const url = (document.getElementById('custom-webhook-url') as HTMLInputElement)?.value;
+                          const headersStr = (document.getElementById('custom-webhook-headers') as HTMLInputElement)?.value;
+                          
+                          if (!url) {
+                            toast.error('Please enter a webhook URL');
+                            return;
+                          }
+                          
+                          let headers = {};
+                          if (headersStr) {
+                            try {
+                              headers = JSON.parse(headersStr);
+                            } catch {
+                              toast.error('Invalid JSON in headers');
+                              return;
+                            }
+                          }
+                          
+                          const res = await fetch('/api/notifications', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              action: 'configure',
+                              type: 'webhook',
+                              config: { url, headers },
+                            }),
+                          });
+                          const data = await res.json();
+                          toast[data.success ? 'success' : 'error'](
+                            data.success ? 'Webhook settings saved! You will receive notifications for system errors and API failures.' : data.error
+                          );
+                        }}
+                      >
+                        Save Settings
+                      </Button>
+                      <Button
+                        onClick={async () => {
+                          const res = await fetch('/api/notifications', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ action: 'test', type: 'webhook' }),
+                          });
+                          const data = await res.json();
+                          toast[data.success ? 'success' : 'error'](
+                            data.success ? 'Test notification sent! Check your webhook endpoint.' : data.error
                           );
                         }}
                       >

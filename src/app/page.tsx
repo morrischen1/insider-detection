@@ -231,31 +231,43 @@ export default function Dashboard() {
         // Continue fetching other data
       }
 
+      // Safely parse JSON responses with error handling
+      const safeParseJson = async (res: Response, name: string) => {
+        try {
+          const text = await res.text();
+          if (!text) return null;
+          return JSON.parse(text);
+        } catch (e) {
+          console.error(`Failed to parse ${name} JSON:`, e);
+          return null;
+        }
+      };
+
       const [status, statsData, watchlistData, configData] = await Promise.all([
-        statusRes.json(),
-        statsRes.json(),
-        watchlistRes.json(),
-        configRes.json(),
+        safeParseJson(statusRes, 'status'),
+        safeParseJson(statsRes, 'stats'),
+        safeParseJson(watchlistRes, 'watchlist'),
+        safeParseJson(configRes, 'config'),
       ]);
 
-      if (status.success) {
-        setEngineStates(status.data.engines);
+      if (status?.success) {
+        setEngineStates(status.data?.engines);
       }
-      if (statsData.success) {
+      if (statsData?.success) {
         setStats({
-          totalTrades: statsData.data.trades.total,
-          suspiciousTrades: statsData.data.trades.suspicious,
-          watchlistCount: statsData.data.accounts.watchlisted,
-          autoTradesToday: statsData.data.autoTrade.todayTrades,
-          detectionRate: statsData.data.trades.detectionRate,
-          avgInsiderProbability: statsData.data.trades.avgProbability,
+          totalTrades: statsData.data?.trades?.total || 0,
+          suspiciousTrades: statsData.data?.trades?.suspicious || 0,
+          watchlistCount: statsData.data?.accounts?.watchlisted || 0,
+          autoTradesToday: statsData.data?.autoTrade?.today || 0,
+          detectionRate: statsData.data?.trades?.detectionRate || 0,
+          avgInsiderProbability: statsData.data?.trades?.avgProbability || 0,
         });
-        setRecentDetections(statsData.data.recentDetections);
+        setRecentDetections(statsData.data?.recentDetections || []);
       }
-      if (watchlistData.success) {
-        setWatchlist(watchlistData.data);
+      if (watchlistData?.success) {
+        setWatchlist(watchlistData.data || []);
       }
-      if (configData.success) {
+      if (configData?.success) {
         setConfig(configData.data);
       }
     } catch (error) {
@@ -273,9 +285,9 @@ export default function Dashboard() {
   }, [fetchData, authChecked]);
 
   useEffect(() => {
-    // Auto-refresh works for all users
+    // Auto-refresh works for all users - reduced to 30s for memory savings
     if (!autoRefresh || !authChecked) return;
-    const interval = setInterval(fetchData, 10000);
+    const interval = setInterval(fetchData, 30000);
     return () => clearInterval(interval);
   }, [autoRefresh, fetchData, authChecked]);
 

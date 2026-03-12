@@ -183,7 +183,7 @@ export default function Dashboard() {
         toast.success('Logged in successfully');
         // Fetch data after successful login
         setTimeout(() => {
-          fetchData();
+          fetchData(true); // Include config after login
         }, 100);
       } else {
         toast.error(data.error || 'Invalid password');
@@ -212,17 +212,28 @@ export default function Dashboard() {
   }, []);
 
   // Fetch all data - public access allowed
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (includeConfig: boolean = false) => {
     // Fetch data regardless of auth status - dashboard is public
 
     try {
-      const [statusRes, statsRes, watchlistRes, configRes, logsRes] = await Promise.all([
+      // Dynamic data that changes frequently
+      const dynamicRequests = [
         fetch('/api/detection/status'),
         fetch('/api/stats'),
         fetch('/api/watchlist?limit=20'),
-        fetch('/api/config'),
         fetch('/api/logs?limit=100'),
-      ]);
+      ];
+
+      // Only fetch config on initial load or after save
+      if (includeConfig) {
+        dynamicRequests.push(fetch('/api/config'));
+      }
+
+      const responses = await Promise.all(dynamicRequests);
+
+      const [statusRes, statsRes, watchlistRes, logsRes, configRes] = includeConfig 
+        ? [responses[0], responses[1], responses[2], responses[3], responses[4]]
+        : [responses[0], responses[1], responses[2], responses[3], null];
 
       // Handle 401 responses - but only if we didn't just log in
       // Note: 401s are okay for public access, just means some features need auth
@@ -233,7 +244,8 @@ export default function Dashboard() {
       }
 
       // Safely parse JSON responses with error handling
-      const safeParseJson = async (res: Response, name: string) => {
+      const safeParseJson = async (res: Response | null, name: string) => {
+        if (!res) return null;
         try {
           const text = await res.text();
           if (!text) return null;
@@ -244,12 +256,12 @@ export default function Dashboard() {
         }
       };
 
-      const [status, statsData, watchlistData, configData, logsData] = await Promise.all([
+      const [status, statsData, watchlistData, logsData, configData] = await Promise.all([
         safeParseJson(statusRes, 'status'),
         safeParseJson(statsRes, 'stats'),
         safeParseJson(watchlistRes, 'watchlist'),
-        safeParseJson(configRes, 'config'),
         safeParseJson(logsRes, 'logs'),
+        safeParseJson(configRes, 'config'),
       ]);
 
       if (status?.success) {
@@ -269,11 +281,11 @@ export default function Dashboard() {
       if (watchlistData?.success) {
         setWatchlist(watchlistData.data || []);
       }
-      if (configData?.success) {
-        setConfig(configData.data);
-      }
       if (logsData?.success) {
         setLogs(logsData.data || []);
+      }
+      if (configData?.success) {
+        setConfig(configData.data);
       }
     } catch (error) {
       console.error('Failed to fetch data:', error);
@@ -282,17 +294,17 @@ export default function Dashboard() {
     }
   }, [isAuthenticated, authEnabled]);
 
+  // Initial fetch - includes config
   useEffect(() => {
-    // Fetch data on mount - dashboard is publicly accessible
     if (authChecked) {
-      fetchData();
+      fetchData(true); // Include config on initial load
     }
   }, [fetchData, authChecked]);
 
+  // Auto-refresh - NO config polling, only dynamic data
   useEffect(() => {
-    // Auto-refresh works for all users - reduced to 30s for memory savings
     if (!autoRefresh || !authChecked) return;
-    const interval = setInterval(fetchData, 30000);
+    const interval = setInterval(() => fetchData(false), 30000); // No config refresh
     return () => clearInterval(interval);
   }, [autoRefresh, fetchData, authChecked]);
 
@@ -307,7 +319,7 @@ export default function Dashboard() {
       const data = await res.json();
       if (data.success) {
         toast.success(data.message);
-        fetchData();
+        fetchData(false); // No config needed
       } else {
         toast.error(data.error);
       }
@@ -327,7 +339,7 @@ export default function Dashboard() {
       const data = await res.json();
       if (data.success) {
         toast.success('Configuration updated');
-        fetchData();
+        fetchData(true); // Fetch config after save
       } else {
         toast.error(data.error);
       }
@@ -707,7 +719,7 @@ export default function Dashboard() {
                               size="sm"
                               onClick={async () => {
                                 await fetch(`/api/watchlist?id=${entry.id}`, { method: 'DELETE' });
-                                fetchData();
+                                fetchData(false); // No config needed
                               }}
                             >
                               Remove

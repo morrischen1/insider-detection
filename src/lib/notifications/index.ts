@@ -1,6 +1,10 @@
 /**
- * Notification System
+ * Notification System (Optimized)
  * Unified notification handling for multiple channels
+ * 
+ * Optimizations:
+ * - Bounded tracking for API error notifications
+ * - Proper cooldown management
  */
 
 import { notificationSettings } from '@/lib/db';
@@ -8,12 +12,19 @@ import { logger } from '@/lib/logger/system';
 import { sendTelegramNotification, formatTelegramMessage } from './telegram';
 import { sendDiscordNotification, formatDiscordEmbed } from './discord';
 import { sendSlackNotification, formatSlackBlocks } from './slack';
+import { BoundedMap } from '@/lib/utils/memory';
 
 import type { Platform, NotificationType, NotificationPayload } from '@/types';
 
-// Track recent API errors to prevent spam
-let lastApiErrorNotification: Date | null = null;
+// Configuration
+const MAX_API_ERROR_TRACKING = 50;
 const API_ERROR_COOLDOWN = 5 * 60 * 1000; // 5 minutes
+
+// Track recent API errors to prevent spam - Bounded to prevent memory leak
+const recentApiErrors = new BoundedMap<string, Date>(
+  MAX_API_ERROR_TRACKING,
+  API_ERROR_COOLDOWN * 2
+);
 
 /**
  * Get active notification settings
@@ -40,6 +51,28 @@ function getActiveNotificationSettings(): {
 }
 
 /**
+ * Check if we should send an API error notification (with cooldown)
+ */
+function shouldSendApiErrorNotification(payload: NotificationPayload): boolean {
+  if (payload.type !== 'error' || !payload.data?.apiError) {
+    return true;
+  }
+
+  // Create a key from the error details
+  const errorKey = `${payload.platform}-${payload.data.endpoint || 'unknown'}`;
+  const now = new Date();
+
+  // Check cooldown
+  if (recentApiErrors.has(errorKey)) {
+    return false;
+  }
+
+  // Record this error
+  recentApiErrors.set(errorKey, now);
+  return true;
+}
+
+/**
  * Send notification via configured channel
  */
 export async function sendNotification(
@@ -56,16 +89,8 @@ export async function sendNotification(
     const { type, config } = settings;
 
     // For API errors, check cooldown to prevent spam
-    if (payload.type === 'error' && payload.data?.apiError) {
-      const now = new Date();
-      if (lastApiErrorNotification) {
-        const timeSinceLast = now.getTime() - lastApiErrorNotification.getTime();
-        if (timeSinceLast < API_ERROR_COOLDOWN) {
-          console.log('Skipping API error notification due to cooldown');
-          return { success: true }; // Don't send but don't error
-        }
-      }
-      lastApiErrorNotification = now;
+    if (!shouldSendApiErrorNotification(payload)) {
+      return { success: true }; // Don't send but don't error
     }
 
     let result: { success: boolean; error?: string };
@@ -110,12 +135,13 @@ export async function sendNotification(
     }
 
     if (result.success) {
-      await logger.info(payload.platform, `Notification sent via ${type}`, {
+      // Log success (fire and forget - logger doesn't return a promise)
+      logger.info(payload.platform, `Notification sent via ${type}`, {
         title: payload.title,
         type: payload.type,
       });
     } else {
-      await logger.error(payload.platform, `Failed to send notification via ${type}`, {
+      logger.error(payload.platform, `Failed to send notification via ${type}`, {
         error: result.error,
       });
     }
@@ -223,6 +249,27 @@ export async function testNotification(type: NotificationType): Promise<{
     message: 'This is a test notification from the Insider Trade Detection System.',
     timestamp: new Date(),
   });
+}
+
+/**
+ * Cleanup resources - Call this on shutdown
+ */
+export function cleanup(): void {
+  recentApiErrors.clear();
+  console.log('Notification system cleanup completed');
+}
+
+/**
+ * Get notification tracking stats for monitoring
+ */
+export function getNotificationStats(): {
+  trackedErrors: number;
+  maxTracked: number;
+} {
+  return {
+    trackedErrors: recentApiErrors.size,
+    maxTracked: MAX_API_ERROR_TRACKING,
+  };
 }
 
 // Export all notification functions

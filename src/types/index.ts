@@ -476,3 +476,59 @@ export const CRITERIA_WEIGHTS = {
 } as const;
 
 export type CriteriaKey = keyof typeof CRITERIA_WEIGHTS;
+
+// ============================================
+// Additional Notification Types
+// ============================================
+
+export interface NotificationPayload {
+  type: 'detection' | 'autotrade' | 'error' | 'info';
+  platform: Platform;
+  title: string;
+  message: string;
+  data?: Record<string, unknown>;
+  timestamp: Date;
+}
+
+export interface NotificationConfigType {
+  telegram?: {
+    botToken: string;
+    chatId: string;
+  };
+  discord?: {
+    webhookUrl: string;
+  };
+  slack?: {
+    webhookUrl: string;
+  };
+  webhook?: {
+    url: string;
+    headers?: Record<string, string>;
+  };
+}
+
+// ============================================
+// Additional Dashboard Types
+// ============================================
+
+export interface RecentDetection {
+  id: string;
+  platform: Platform;
+  marketId: string;
+  marketTicker?: string;
+  outcome: Outcome;
+  usdValue: number;
+  insiderProbability: number;
+  timestamp: Date;
+  accountAddress: string;
+}
+
+export interface WatchlistEntry {
+  id: string;
+  platform: Platform;
+  accountAddress: string;
+  reason: string;
+  probability: number;
+  flaggedAt: Date;
+  isActive: boolean;
+}

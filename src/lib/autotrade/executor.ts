@@ -1,16 +1,19 @@
 /**
- * Auto-Trade Executor
+ * Auto-Trade Executor (Optimized)
  * Executes automatic trades when insider trades are detected
+ * 
+ * Optimizations:
+ * - Bounded map for rate limiting to prevent memory leak
+ * - Proper resource cleanup
+ * - Sliding window rate limiter for better accuracy
  */
 
-import {
-  autoTrades,
-  db,
-} from '@/lib/db';
+import { autoTrades, db } from '@/lib/db';
 import { logger } from '@/lib/logger/system';
 import { sendNotification } from '@/lib/notifications';
 import { clobClient } from '@/lib/polymarket/clob';
 import { kalshiClient } from '@/lib/kalshi/client';
+import { SlidingWindowRateLimiter } from '@/lib/utils/memory';
 
 import type {
   Platform,
@@ -20,33 +23,35 @@ import type {
   AutoTradeStatus,
 } from '@/types';
 
-// Rate limiting
-const recentAutoTrades: Map<string, Date[]> = new Map();
+// Configuration
 const DEFAULT_RATE_LIMIT = 10; // Max trades per hour per platform
+const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour in milliseconds
+
+// Sliding window rate limiter - automatically cleans up old entries
+const rateLimiter = new SlidingWindowRateLimiter(
+  RATE_LIMIT_WINDOW,
+  DEFAULT_RATE_LIMIT,
+  RATE_LIMIT_WINDOW // Auto cleanup every hour
+);
 
 /**
  * Check rate limit for auto-trades
  */
 function checkRateLimit(platform: Platform, limit?: number): boolean {
   const maxTrades = limit || DEFAULT_RATE_LIMIT;
-  const now = new Date();
-  const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-
-  const key = platform;
-  const trades = recentAutoTrades.get(key) || [];
-
-  // Filter out old trades
-  const recentTrades = trades.filter(t => t > oneHourAgo);
-
-  if (recentTrades.length >= maxTrades) {
+  
+  // Temporarily update max requests if custom limit provided
+  const key = `${platform}-autotrade`;
+  
+  // Check current count
+  const currentCount = rateLimiter.getCount(key);
+  
+  if (currentCount >= maxTrades) {
     return false;
   }
-
-  // Add current trade
-  recentTrades.push(now);
-  recentAutoTrades.set(key, recentTrades);
-
-  return true;
+  
+  // Use the rate limiter
+  return rateLimiter.isAllowed(key);
 }
 
 /**
@@ -235,43 +240,29 @@ export async function executeAutoTrade(
       ? await executePolymarketAutoTrade(request)
       : await executeKalshiAutoTrade(request);
 
-  // Send notification
-  if (result.success) {
-    await sendNotification({
-      type: 'autotrade',
-      platform,
-      title: 'Auto-Trade Executed',
-      message: `Successfully placed $${amount.toFixed(2)} bet on ${outcome}`,
-      data: {
-        marketId,
-        outcome,
-        amount,
-        probability,
-        autoTradeId: result.autoTradeId,
-      },
-      timestamp: new Date(),
-    });
-  } else {
-    await sendNotification({
-      type: 'error',
-      platform,
-      title: 'Auto-Trade Failed',
-      message: `Failed to place bet: ${result.errorMessage}`,
-      data: {
-        marketId,
-        outcome,
-        amount,
-        probability,
-      },
-      timestamp: new Date(),
-    });
-  }
+  // Send notification (fire and forget to avoid blocking)
+  sendNotification({
+    type: result.success ? 'autotrade' : 'error',
+    platform,
+    title: result.success ? 'Auto-Trade Executed' : 'Auto-Trade Failed',
+    message: result.success
+      ? `Successfully placed $${amount.toFixed(2)} bet on ${outcome}`
+      : `Failed to place bet: ${result.errorMessage}`,
+    data: {
+      marketId,
+      outcome,
+      amount,
+      probability,
+      autoTradeId: result.autoTradeId,
+    },
+    timestamp: new Date(),
+  }).catch(err => console.error('Failed to send notification:', err));
 
   return result;
 }
 
 /**
- * Get auto-trade history
+ * Get auto-trade history with optimized pagination
  */
 export function getAutoTradeHistory(params: {
   platform?: Platform;
@@ -281,7 +272,8 @@ export function getAutoTradeHistory(params: {
 }): { trades: any[]; total: number; hasMore: boolean } {
   const { platform, status, limit = 50, offset = 0 } = params;
 
-  let sql = 'SELECT * FROM auto_trades';
+  // Build count query first
+  let countSql = 'SELECT COUNT(*) as count FROM auto_trades';
   const conditions: string[] = [];
   const sqlParams: any[] = [];
 
@@ -295,15 +287,25 @@ export function getAutoTradeHistory(params: {
   }
 
   if (conditions.length > 0) {
+    countSql += ' WHERE ' + conditions.join(' AND ');
+  }
+
+  const countStmt = db.prepare(countSql);
+  const totalResult = countStmt.get(...sqlParams) as { count: number };
+  const total = totalResult.count;
+
+  // Now get paginated results
+  let sql = 'SELECT * FROM auto_trades';
+  if (conditions.length > 0) {
     sql += ' WHERE ' + conditions.join(' AND ');
   }
-  sql += ' ORDER BY created_at DESC LIMIT ?';
-  sqlParams.push(limit + offset);
+  sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+  sqlParams.push(limit, offset);
 
   const stmt = db.prepare(sql);
   const rows = stmt.all(...sqlParams) as any[];
 
-  const trades = rows.map(row => ({
+  const tradeResults = rows.map(row => ({
     id: row.id,
     platform: row.platform,
     triggerTradeId: row.trigger_trade_id,
@@ -318,9 +320,9 @@ export function getAutoTradeHistory(params: {
   }));
 
   return {
-    trades: trades.slice(offset),
-    total: trades.length,
-    hasMore: trades.length > limit,
+    trades: tradeResults,
+    total,
+    hasMore: total > offset + limit,
   };
 }
 
@@ -334,11 +336,45 @@ export function getAutoTradeStats(platform?: Platform): {
   todayTrades: number;
   totalAmountExecuted: number;
 } {
+  // Use transaction for consistency
+  const getStats = db.transaction(() => {
+    const executed = autoTrades.countByStatus('executed');
+    const failed = autoTrades.countByStatus('failed');
+    const pending = autoTrades.countByStatus('pending');
+
+    return { executed, failed, pending };
+  });
+
+  const stats = getStats();
+
   return {
-    total: autoTrades.countByStatus('executed') + autoTrades.countByStatus('failed') + autoTrades.countByStatus('pending'),
-    executed: autoTrades.countByStatus('executed'),
-    failed: autoTrades.countByStatus('failed'),
+    total: stats.executed + stats.failed + stats.pending,
+    executed: stats.executed,
+    failed: stats.failed,
     todayTrades: autoTrades.countToday(),
     totalAmountExecuted: 0, // Would need aggregate query
+  };
+}
+
+/**
+ * Cleanup resources - Call this on shutdown
+ */
+export function cleanup(): void {
+  rateLimiter.destroy();
+  console.log('Auto-trade executor cleanup completed');
+}
+
+/**
+ * Get rate limiter status for monitoring
+ */
+export function getRateLimiterStatus(platform: Platform): {
+  currentCount: number;
+  maxRequests: number;
+  windowMs: number;
+} {
+  return {
+    currentCount: rateLimiter.getCount(`${platform}-autotrade`),
+    maxRequests: DEFAULT_RATE_LIMIT,
+    windowMs: RATE_LIMIT_WINDOW,
   };
 }

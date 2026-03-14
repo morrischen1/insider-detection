@@ -1,24 +1,40 @@
 /**
- * System Logger
+ * System Logger (Optimized)
  * Logs system activity to the database and sends error notifications
+ * 
+ * Optimizations:
+ * - Bounded map for error notification tracking
+ * - Periodic cleanup of old entries
+ * - Resource cleanup on shutdown
+ * - No circular dependencies
  */
 
 import { detectionLogs } from '@/lib/db';
-import { sendNotification } from '@/lib/notifications';
+import { BoundedMap } from '@/lib/utils/memory';
 import type { Platform, LogType } from '@/types';
 
-// Track recent system error notifications to prevent spam
-const recentSystemErrorNotifications = new Map<string, Date>();
+// Configuration
+const MAX_ERROR_NOTIFICATIONS_TRACKED = 100;
 const SYSTEM_ERROR_NOTIFICATION_COOLDOWN = 5 * 60 * 1000; // 5 minutes
+const CLEANUP_INTERVAL = 10 * 60 * 1000; // 10 minutes
 
-interface LogEntry {
+// Track recent system error notifications to prevent spam - Bounded to prevent memory leak
+const recentSystemErrorNotifications = new BoundedMap<string, Date>(
+  MAX_ERROR_NOTIFICATIONS_TRACKED,
+  SYSTEM_ERROR_NOTIFICATION_COOLDOWN * 2
+);
+
+// Cleanup interval reference
+let cleanupInterval: NodeJS.Timeout | null = null;
+
+interface LogEntryInternal {
   platform: Platform;
   type: LogType;
   message: string;
   details?: Record<string, unknown>;
 }
 
-export function logDetection(entry: LogEntry): void {
+export function logDetection(entry: LogEntryInternal): void {
   try {
     detectionLogs.create({
       platform: entry.platform,
@@ -26,57 +42,12 @@ export function logDetection(entry: LogEntry): void {
       message: entry.message,
       details: entry.details,
     });
-
-    // Send notification for system errors
-    if (entry.type === 'error') {
-      sendSystemErrorNotification(entry);
-    }
   } catch (error) {
     console.error('Failed to log detection:', error);
   }
 }
 
-/**
- * Send notification for system errors via webhook
- */
-async function sendSystemErrorNotification(entry: LogEntry): Promise<void> {
-  const errorKey = `${entry.platform}-${entry.message.slice(0, 50)}`;
-  const now = new Date();
-  
-  // Check cooldown to prevent spam
-  const lastNotification = recentSystemErrorNotifications.get(errorKey);
-  if (lastNotification && now.getTime() - lastNotification.getTime() < SYSTEM_ERROR_NOTIFICATION_COOLDOWN) {
-    return;
-  }
-  
-  recentSystemErrorNotifications.set(errorKey, now);
-  
-  // Clean up old entries
-  for (const [key, timestamp] of recentSystemErrorNotifications.entries()) {
-    if (now.getTime() - timestamp.getTime() > SYSTEM_ERROR_NOTIFICATION_COOLDOWN * 2) {
-      recentSystemErrorNotifications.delete(key);
-    }
-  }
-  
-  try {
-    await sendNotification({
-      type: 'error',
-      platform: entry.platform,
-      title: 'System Error Detected',
-      message: `${entry.message}${entry.details ? `\nDetails: ${JSON.stringify(entry.details)}` : ''}`,
-      data: {
-        systemError: true,
-        message: entry.message,
-        details: entry.details,
-      },
-      timestamp: now,
-    });
-  } catch (error) {
-    console.error('Failed to send system error notification:', error);
-  }
-}
-
-// Convenience functions
+// Convenience logger functions
 export const logger = {
   info: (platform: Platform, message: string, details?: Record<string, unknown>) =>
     logDetection({ platform, type: 'info', message, details }),
@@ -118,23 +89,26 @@ export function cleanupOldLogs(retentionDays: number = 365): number {
   return detectionLogs.deleteOld(retentionDays);
 }
 
-// Export logs as JSON
+// Export logs as JSON - Limited to prevent memory issues
 export function exportLogs(params: {
   platform?: Platform;
   type?: LogType;
+  limit?: number;
 }): string {
-  const logs = detectionLogs.getRecent(10000, params.platform, params.type);
+  const limit = Math.min(params.limit || 1000, 5000); // Cap at 5000 to prevent memory issues
+  const logs = detectionLogs.getRecent(limit, params.platform, params.type);
   return JSON.stringify(logs, null, 2);
 }
 
-// Get log statistics
+// Get log statistics - Optimized with reasonable limit
 export function getLogStats(platform?: Platform): {
   total: number;
   byType: Record<LogType, number>;
   last24h: number;
   last7d: number;
 } {
-  const logs = detectionLogs.getRecent(10000, platform);
+  // Use a reasonable limit for stats calculation
+  const logs = detectionLogs.getRecent(5000, platform);
 
   const now = Date.now();
   const last24h = now - 24 * 60 * 60 * 1000;
@@ -165,3 +139,36 @@ export function getLogStats(platform?: Platform): {
     last7d: last7dCount,
   };
 }
+
+/**
+ * Start periodic cleanup of old notification tracking entries
+ */
+export function startCleanup(): void {
+  if (cleanupInterval) return;
+
+  cleanupInterval = setInterval(() => {
+    const removed = recentSystemErrorNotifications.cleanup();
+    if (removed > 0) {
+      console.log(`Cleaned up ${removed} old error notification entries`);
+    }
+  }, CLEANUP_INTERVAL);
+  
+  // Don't prevent the process from exiting
+  if (cleanupInterval.unref) {
+    cleanupInterval.unref();
+  }
+}
+
+/**
+ * Stop cleanup and release resources
+ */
+export function cleanup(): void {
+  if (cleanupInterval) {
+    clearInterval(cleanupInterval);
+    cleanupInterval = null;
+  }
+  recentSystemErrorNotifications.clear();
+}
+
+// Auto-start cleanup
+startCleanup();

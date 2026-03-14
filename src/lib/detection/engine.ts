@@ -1,6 +1,12 @@
 /**
- * Detection Engine
+ * Detection Engine (Optimized)
  * Main engine for detecting insider trades
+ * 
+ * Optimizations:
+ * - Bounded map for processed trades to prevent memory leaks
+ * - Batch processing of trades for better performance
+ * - Proper cleanup of intervals and resources
+ * - Concurrent processing with controlled parallelism
  */
 
 import {
@@ -17,6 +23,7 @@ import { dataClient } from '@/lib/polymarket/data';
 import { kalshiClient } from '@/lib/kalshi/client';
 import { sendNotification } from '@/lib/notifications';
 import { executeAutoTrade } from '@/lib/autotrade/executor';
+import { BoundedMap, TTLCache } from '@/lib/utils/memory';
 
 import type {
   Platform,
@@ -30,6 +37,12 @@ import type {
   GlobalConfig,
 } from '@/types';
 import { DEFAULT_PLATFORM_CONFIG, DEFAULT_GLOBAL_CONFIG } from '@/types';
+
+// Configuration constants
+const MAX_PROCESSED_TRADES = 10000; // Maximum number of trades to track
+const PROCESSED_TRADES_TTL = 24 * 60 * 60 * 1000; // 24 hours TTL for processed trades
+const BATCH_SIZE = 10; // Number of trades to process in parallel
+const CONCURRENT_MARKETS = 5; // Number of markets to process concurrently
 
 // Engine state per platform
 const engineStates: Record<Platform, DetectionEngineState> = {
@@ -55,33 +68,63 @@ const pollingIntervals: Record<Platform, NodeJS.Timeout | null> = {
   kalshi: null,
 };
 
-// Config cache
-let globalConfig: GlobalConfig = DEFAULT_GLOBAL_CONFIG;
-let platformConfigs: Record<Platform, PlatformConfig> = {
-  polymarket: DEFAULT_PLATFORM_CONFIG,
-  kalshi: DEFAULT_PLATFORM_CONFIG,
-};
+// Config cache with TTL
+const configCache = new TTLCache<string, GlobalConfig | PlatformConfig>(60 * 1000, 60 * 1000);
 
-// Last processed trade timestamps per market
-const lastProcessedTrades: Map<string, Date> = new Map();
+// Last processed trade timestamps per market - Using bounded map to prevent memory leak
+const lastProcessedTrades = new BoundedMap<string, Date>(MAX_PROCESSED_TRADES, PROCESSED_TRADES_TTL);
+
+// Track active scans to prevent overlapping
+let activeScanCount = 0;
+const MAX_CONCURRENT_SCANS = 2;
 
 /**
- * Load configuration from database
+ * Load configuration from database with caching
  */
 export async function loadConfig(): Promise<void> {
   try {
+    const cachedGlobal = configCache.get('global') as GlobalConfig | undefined;
+    const cachedPolymarket = configCache.get('platform_polymarket') as PlatformConfig | undefined;
+    const cachedKalshi = configCache.get('platform_kalshi') as PlatformConfig | undefined;
+
+    if (cachedGlobal && cachedPolymarket && cachedKalshi) {
+      // Use cached config
+      return;
+    }
+
     // Load global config
-    globalConfig = config.getGlobalConfig();
+    const globalConfig = config.getGlobalConfig();
+    configCache.set('global', globalConfig);
 
     // Load platform-specific configs
-    platformConfigs.polymarket = config.getPlatformConfig('polymarket');
-    platformConfigs.kalshi = config.getPlatformConfig('kalshi');
+    const polymarketConfig = config.getPlatformConfig('polymarket');
+    const kalshiConfig = config.getPlatformConfig('kalshi');
+    
+    configCache.set('platform_polymarket', polymarketConfig);
+    configCache.set('platform_kalshi', kalshiConfig);
 
     logger.info('polymarket', 'Configuration loaded successfully');
   } catch (error) {
     logger.error('polymarket', 'Failed to load configuration', { error: String(error) });
   }
 }
+
+/**
+ * Get cached config (exported for external use)
+ */
+export function getConfig(): { global: GlobalConfig; platforms: Record<Platform, PlatformConfig> } {
+  const global = (configCache.get('global') as GlobalConfig) || DEFAULT_GLOBAL_CONFIG;
+  const polymarket = (configCache.get('platform_polymarket') as PlatformConfig) || DEFAULT_PLATFORM_CONFIG;
+  const kalshi = (configCache.get('platform_kalshi') as PlatformConfig) || DEFAULT_PLATFORM_CONFIG;
+
+  return {
+    global,
+    platforms: { polymarket, kalshi },
+  };
+}
+
+// Internal alias for use within this module
+const getCachedConfig = getConfig;
 
 /**
  * Get or create account in database
@@ -108,106 +151,134 @@ async function getOrCreateAccount(
 }
 
 /**
- * Process a single trade
+ * Process a batch of trades in parallel
  */
-async function processTrade(
+async function processTradeBatch(
   platform: Platform,
-  trade: TradeInfo,
-  market: MarketInfo
-): Promise<DetectionResult | null> {
-  try {
-    // Get or create account
-    const account = await getOrCreateAccount(platform, trade.accountId, trade.timestamp);
+  tradeBatch: Array<{ trade: TradeInfo; market: MarketInfo }>
+): Promise<Array<DetectionResult | null>> {
+  const { global, platforms } = getCachedConfig();
 
-    // Build detection config
-    const detectionConfig: DetectionConfig = {
-      ...platformConfigs[platform],
-      ...globalConfig,
-      platform,
-    };
+  return Promise.all(
+    tradeBatch.map(async ({ trade, market }) => {
+      try {
+        // Check if already processed
+        const tradeKey = `${trade.marketId}-${trade.id}`;
+        if (lastProcessedTrades.has(tradeKey)) {
+          return null;
+        }
 
-    // Evaluate criteria
-    const result = await evaluateAllCriteria({
-      trade,
-      account,
-      market,
-      platform,
-      config: detectionConfig,
-    });
+        // Get or create account
+        const account = await getOrCreateAccount(platform, trade.accountId, trade.timestamp);
 
-    // Store trade in database
-    trades.create({
-      platform,
-      marketId: trade.marketId,
-      marketTicker: trade.marketTicker,
-      accountId: account.id,
-      outcome: trade.outcome,
-      price: trade.price,
-      size: trade.size,
-      usdValue: trade.usdValue,
-      timestamp: trade.timestamp,
-      isSuspicious: result.isSuspicious,
-      insiderProbability: result.probability,
-    });
+        // Build detection config
+        const detectionConfig: DetectionConfig = {
+          ...platforms[platform],
+          ...global,
+          platform,
+        };
 
-    // Update account stats
-    accounts.updateStats(account.id, {
-      totalTrades: account.totalTrades + 1,
-      totalVolume: account.totalVolume + trade.usdValue,
-    });
+        // Evaluate criteria
+        const result = await evaluateAllCriteria({
+          trade,
+          account,
+          market,
+          platform,
+          config: detectionConfig,
+        });
 
-    // Log detection
-    if (result.isSuspicious) {
-      await logger.detection(platform, `Suspicious trade detected: ${result.probability.toFixed(1)}% probability`, {
-        tradeId: trade.id,
-        marketId: trade.marketId,
-        accountAddress: account.address,
-        probability: result.probability,
-        criteriaScores: result.criteriaScores,
-        reasons: result.reasons,
-      });
-
-      // Add to watchlist if high probability
-      if (result.probability >= 70 && !account.isWatchlisted) {
-        await addToWatchlist(account.id, platform, result.reasons.join('; '), result.probability);
-      }
-
-      // Send notification
-      await sendNotification({
-        type: 'detection',
-        platform,
-        title: 'Insider Trade Detected',
-        message: `Probability: ${result.probability.toFixed(1)}%\nMarket: ${market.ticker || trade.marketId}\nAmount: $${trade.usdValue.toFixed(2)}`,
-        data: {
-          tradeId: trade.id,
-          accountAddress: account.address,
-          probability: result.probability,
-          usdValue: trade.usdValue,
-        },
-        timestamp: new Date(),
-      });
-
-      // Execute auto-trade if enabled
-      if (globalConfig.autoTradeEnabled && result.probability >= globalConfig.autoTradeProbabilityThreshold) {
-        await executeAutoTrade({
+        // Store trade in database
+        trades.create({
           platform,
           marketId: trade.marketId,
+          marketTicker: trade.marketTicker,
+          accountId: account.id,
           outcome: trade.outcome,
-          amount: globalConfig.autoTradeAmount,
-          triggerTradeId: trade.id,
-          probability: result.probability,
+          price: trade.price,
+          size: trade.size,
+          usdValue: trade.usdValue,
+          timestamp: trade.timestamp,
+          isSuspicious: result.isSuspicious,
+          insiderProbability: result.probability,
         });
-      }
-    }
 
-    return result;
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    engineStates[platform].errors.push({
-      timestamp: new Date(),
-      message: `Failed to process trade: ${errorMessage}`,
-    });
-    return null;
+        // Update account stats
+        accounts.updateStats(account.id, {
+          totalTrades: account.totalTrades + 1,
+          totalVolume: account.totalVolume + trade.usdValue,
+        });
+
+        // Mark as processed
+        lastProcessedTrades.set(tradeKey, trade.timestamp);
+
+        // Handle suspicious trades
+        if (result.isSuspicious) {
+          await handleSuspiciousTrade(platform, trade, market, account, result, global);
+        }
+
+        return result;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        engineStates[platform].errors.push({
+          timestamp: new Date(),
+          message: `Failed to process trade: ${errorMessage}`,
+        });
+        return null;
+      }
+    })
+  );
+}
+
+/**
+ * Handle suspicious trade detection
+ */
+async function handleSuspiciousTrade(
+  platform: Platform,
+  trade: TradeInfo,
+  market: MarketInfo,
+  account: AccountInfo,
+  result: DetectionResult,
+  globalConfig: GlobalConfig
+): Promise<void> {
+  await logger.detection(platform, `Suspicious trade detected: ${result.probability.toFixed(1)}% probability`, {
+    tradeId: trade.id,
+    marketId: trade.marketId,
+    accountAddress: account.address,
+    probability: result.probability,
+    criteriaScores: result.criteriaScores,
+    reasons: result.reasons,
+  });
+
+  // Add to watchlist if high probability
+  if (result.probability >= 70 && !account.isWatchlisted) {
+    await addToWatchlist(account.id, platform, result.reasons.join('; '), result.probability);
+  }
+
+  // Send notification (fire and forget)
+  sendNotification({
+    type: 'detection',
+    platform,
+    title: 'Insider Trade Detected',
+    message: `Probability: ${result.probability.toFixed(1)}%\nMarket: ${market.ticker || trade.marketId}\nAmount: $${trade.usdValue.toFixed(2)}`,
+    data: {
+      tradeId: trade.id,
+      accountAddress: account.address,
+      probability: result.probability,
+      usdValue: trade.usdValue,
+    },
+    timestamp: new Date(),
+  }).catch(err => console.error('Failed to send notification:', err));
+
+  // Execute auto-trade if enabled
+  if (globalConfig.autoTradeEnabled && result.probability >= globalConfig.autoTradeProbabilityThreshold) {
+    executeAutoTrade({
+      platform,
+      marketId: trade.marketId,
+      outcome: trade.outcome,
+      amount: globalConfig.autoTradeAmount,
+      triggerTradeId: trade.id,
+      probability: result.probability,
+    }).catch(err => console.error('Failed to execute auto-trade:', err));
   }
 }
 
@@ -242,46 +313,68 @@ async function addToWatchlist(
 }
 
 /**
+ * Process trades from a market with controlled concurrency
+ */
+async function processMarketTrades(
+  platform: Platform,
+  market: MarketInfo,
+  getTradesFn: () => Promise<TradeInfo[]>
+): Promise<number> {
+  try {
+    const marketTrades = await getTradesFn();
+    
+    if (marketTrades.length === 0) return 0;
+
+    // Process trades in batches
+    let processedCount = 0;
+    const state = engineStates[platform];
+
+    for (let i = 0; i < marketTrades.length; i += BATCH_SIZE) {
+      const batch = marketTrades.slice(i, i + BATCH_SIZE);
+      const tradeBatch = batch.map(trade => ({ trade, market }));
+      
+      const results = await processTradeBatch(platform, tradeBatch);
+      processedCount += results.filter(r => r !== null).length;
+    }
+
+    state.tradesProcessed += processedCount;
+    return processedCount;
+  } catch (error) {
+    await logger.warning(platform, `Error processing market ${market.id}`, {
+      error: String(error),
+    });
+    return 0;
+  }
+}
+
+/**
  * Scan Polymarket for new trades
  */
 async function scanPolymarket(): Promise<void> {
-  const platformConfig = platformConfigs.polymarket;
+  // Prevent overlapping scans
+  if (activeScanCount >= MAX_CONCURRENT_SCANS) {
+    return;
+  }
+  activeScanCount++;
+
+  const { platforms } = getCachedConfig();
   const state = engineStates.polymarket;
 
   try {
     await logger.info('polymarket', 'Starting market scan');
 
     // Get active markets with sufficient liquidity
-    const markets = await gammaClient.getActiveMarketsWithLiquidity(platformConfig.minMarketLiquidity);
+    const markets = await gammaClient.getActiveMarketsWithLiquidity(platforms.polymarket.minMarketLiquidity);
     state.marketsScanned += markets.length;
 
-    for (const market of markets) {
-      try {
-        // Get recent trades for this market
-        const marketTrades = await dataClient.getMarketTrades(market.id, { limit: 50 });
-
-        for (const trade of marketTrades) {
-          const tradeKey = `${market.id}-${trade.id}`;
-          const lastProcessed = lastProcessedTrades.get(tradeKey);
-
-          // Skip if already processed
-          if (lastProcessed) continue;
-
-          const tradeTimestamp = new Date(trade.timestamp);
-
-          // Process trade
-          const tradeInfo: TradeInfo = {
-            id: trade.id,
-            marketId: market.id,
-            marketTicker: market.slug,
-            outcome: trade.outcome,
-            price: parseFloat(trade.price),
-            size: parseFloat(trade.size),
-            usdValue: parseFloat(trade.usdValue),
-            timestamp: tradeTimestamp,
-            accountId: trade.taker, // Using taker as the trader
-          };
-
+    // Process markets concurrently with controlled parallelism
+    const marketPromises: Promise<void>[] = [];
+    
+    for (let i = 0; i < markets.length; i += CONCURRENT_MARKETS) {
+      const marketBatch = markets.slice(i, i + CONCURRENT_MARKETS);
+      
+      const batchPromise = Promise.all(
+        marketBatch.map(async (market) => {
           const marketInfo: MarketInfo = {
             id: market.id,
             ticker: market.slug,
@@ -292,16 +385,27 @@ async function scanPolymarket(): Promise<void> {
             outcomes: market.outcomes || ['Yes', 'No'],
           };
 
-          await processTrade('polymarket', tradeInfo, marketInfo);
-          lastProcessedTrades.set(tradeKey, tradeTimestamp);
-          state.tradesProcessed++;
-        }
-      } catch (marketError) {
-        await logger.warning('polymarket', `Error processing market ${market.id}`, {
-          error: String(marketError),
-        });
-      }
+          return processMarketTrades('polymarket', marketInfo, async () => {
+            const marketTrades = await dataClient.getMarketTrades(market.id, { limit: 50 });
+            return marketTrades.map(trade => ({
+              id: trade.id,
+              marketId: market.id,
+              marketTicker: market.slug,
+              outcome: trade.outcome,
+              price: parseFloat(trade.price),
+              size: parseFloat(trade.size),
+              usdValue: parseFloat(trade.usdValue),
+              timestamp: new Date(trade.timestamp),
+              accountId: trade.taker,
+            }));
+          });
+        })
+      );
+
+      marketPromises.push(batchPromise.then(() => {}));
     }
+
+    await Promise.all(marketPromises);
 
     state.lastScanTime = new Date();
     await logger.info('polymarket', `Scan completed. Markets: ${markets.length}, Total trades: ${state.tradesProcessed}`);
@@ -312,6 +416,8 @@ async function scanPolymarket(): Promise<void> {
       message: errorMessage,
     });
     await logger.error('polymarket', 'Scan failed', { error: errorMessage });
+  } finally {
+    activeScanCount--;
   }
 }
 
@@ -319,43 +425,30 @@ async function scanPolymarket(): Promise<void> {
  * Scan Kalshi for new trades
  */
 async function scanKalshi(): Promise<void> {
-  const platformConfig = platformConfigs.kalshi;
+  // Prevent overlapping scans
+  if (activeScanCount >= MAX_CONCURRENT_SCANS) {
+    return;
+  }
+  activeScanCount++;
+
+  const { platforms } = getCachedConfig();
   const state = engineStates.kalshi;
 
   try {
     await logger.info('kalshi', 'Starting market scan');
 
     // Get active markets with sufficient liquidity
-    const markets = await kalshiClient.getActiveMarketsWithLiquidity(platformConfig.minMarketLiquidity);
+    const markets = await kalshiClient.getActiveMarketsWithLiquidity(platforms.kalshi.minMarketLiquidity);
     state.marketsScanned += markets.length;
 
-    for (const market of markets) {
-      try {
-        // Get recent trades for this market
-        const { trades: marketTrades } = await kalshiClient.getMarketTrades(market.ticker, { limit: 50 });
-
-        for (const trade of marketTrades) {
-          const tradeKey = `${market.ticker}-${trade.id}`;
-          const lastProcessed = lastProcessedTrades.get(tradeKey);
-
-          // Skip if already processed
-          if (lastProcessed) continue;
-
-          const tradeTimestamp = new Date(trade.timestamp);
-
-          // Process trade
-          const tradeInfo: TradeInfo = {
-            id: trade.id,
-            marketId: market.ticker,
-            marketTicker: market.ticker,
-            outcome: trade.outcome,
-            price: trade.price,
-            size: trade.size,
-            usdValue: trade.usdValue,
-            timestamp: tradeTimestamp,
-            accountId: trade.userId || 'unknown',
-          };
-
+    // Process markets concurrently with controlled parallelism
+    const marketPromises: Promise<void>[] = [];
+    
+    for (let i = 0; i < markets.length; i += CONCURRENT_MARKETS) {
+      const marketBatch = markets.slice(i, i + CONCURRENT_MARKETS);
+      
+      const batchPromise = Promise.all(
+        marketBatch.map(async (market) => {
           const marketInfo: MarketInfo = {
             id: market.ticker,
             ticker: market.ticker,
@@ -366,16 +459,27 @@ async function scanKalshi(): Promise<void> {
             outcomes: ['Yes', 'No'],
           };
 
-          await processTrade('kalshi', tradeInfo, marketInfo);
-          lastProcessedTrades.set(tradeKey, tradeTimestamp);
-          state.tradesProcessed++;
-        }
-      } catch (marketError) {
-        await logger.warning('kalshi', `Error processing market ${market.ticker}`, {
-          error: String(marketError),
-        });
-      }
+          return processMarketTrades('kalshi', marketInfo, async () => {
+            const { trades: marketTrades } = await kalshiClient.getMarketTrades(market.ticker, { limit: 50 });
+            return marketTrades.map(trade => ({
+              id: trade.id,
+              marketId: market.ticker,
+              marketTicker: market.ticker,
+              outcome: trade.outcome,
+              price: trade.price,
+              size: trade.size,
+              usdValue: trade.usdValue,
+              timestamp: new Date(trade.timestamp),
+              accountId: trade.userId || 'unknown',
+            }));
+          });
+        })
+      );
+
+      marketPromises.push(batchPromise.then(() => {}));
     }
+
+    await Promise.all(marketPromises);
 
     state.lastScanTime = new Date();
     await logger.info('kalshi', `Scan completed. Markets: ${markets.length}, Total trades: ${state.tradesProcessed}`);
@@ -386,6 +490,8 @@ async function scanKalshi(): Promise<void> {
       message: errorMessage,
     });
     await logger.error('kalshi', 'Scan failed', { error: errorMessage });
+  } finally {
+    activeScanCount--;
   }
 }
 
@@ -400,7 +506,9 @@ export async function startDetection(platform: Platform): Promise<void> {
 
   await loadConfig();
 
-  if (!platformConfigs[platform].enabled) {
+  const { platforms } = getCachedConfig();
+  
+  if (!platforms[platform].enabled) {
     await logger.warning(platform, 'Detection is disabled for this platform');
     return;
   }
@@ -411,7 +519,7 @@ export async function startDetection(platform: Platform): Promise<void> {
   await logger.info(platform, 'Starting detection engine');
 
   const scanFn = platform === 'polymarket' ? scanPolymarket : scanKalshi;
-  const intervalMs = platformConfigs[platform].pollingInterval * 1000;
+  const intervalMs = platforms[platform].pollingInterval * 1000;
 
   // Run initial scan
   await scanFn();
@@ -480,10 +588,10 @@ export async function updatePlatformConfig(
   platform: Platform,
   updates: Partial<PlatformConfig>
 ): Promise<void> {
-  platformConfigs[platform] = {
-    ...platformConfigs[platform],
-    ...updates,
-  };
+  const { platforms } = getCachedConfig();
+  const newConfig = { ...platforms[platform], ...updates };
+  
+  configCache.set(`platform_${platform}`, newConfig);
 
   // Save to database
   config.setPlatformConfig(platform, updates);
@@ -501,10 +609,10 @@ export async function updatePlatformConfig(
  * Update global config
  */
 export async function updateGlobalConfig(updates: Partial<GlobalConfig>): Promise<void> {
-  globalConfig = {
-    ...globalConfig,
-    ...updates,
-  };
+  const { global } = getCachedConfig();
+  const newConfig = { ...global, ...updates };
+  
+  configCache.set('global', newConfig);
 
   // Save to database
   config.setGlobalConfig(updates);
@@ -513,14 +621,56 @@ export async function updateGlobalConfig(updates: Partial<GlobalConfig>): Promis
 }
 
 /**
- * Get current config
+ * Cleanup resources - Call this on shutdown
  */
-export function getConfig(): {
-  global: GlobalConfig;
-  platforms: Record<Platform, PlatformConfig>;
+export function cleanup(): void {
+  // Stop all intervals
+  for (const platform of ['polymarket', 'kalshi'] as Platform[]) {
+    if (pollingIntervals[platform]) {
+      clearInterval(pollingIntervals[platform]!);
+      pollingIntervals[platform] = null;
+    }
+    engineStates[platform].isRunning = false;
+  }
+
+  // Clear caches
+  configCache.destroy();
+  lastProcessedTrades.clear();
+  
+  console.log('Detection engine cleanup completed');
+}
+
+/**
+ * Get memory statistics for monitoring
+ */
+export function getEngineStats(): {
+  processedTradesCacheSize: number;
+  configCacheSize: number;
+  activeScanCount: number;
+  platforms: Record<Platform, {
+    isRunning: boolean;
+    marketsScanned: number;
+    tradesProcessed: number;
+    errorCount: number;
+  }>;
 } {
   return {
-    global: globalConfig,
-    platforms: platformConfigs,
+    processedTradesCacheSize: lastProcessedTrades.size,
+    configCacheSize: configCache.size,
+    activeScanCount,
+    platforms: {
+      polymarket: {
+        isRunning: engineStates.polymarket.isRunning,
+        marketsScanned: engineStates.polymarket.marketsScanned,
+        tradesProcessed: engineStates.polymarket.tradesProcessed,
+        errorCount: engineStates.polymarket.errors.length,
+      },
+      kalshi: {
+        isRunning: engineStates.kalshi.isRunning,
+        marketsScanned: engineStates.kalshi.marketsScanned,
+        tradesProcessed: engineStates.kalshi.tradesProcessed,
+        errorCount: engineStates.kalshi.errors.length,
+      },
+    },
   };
 }

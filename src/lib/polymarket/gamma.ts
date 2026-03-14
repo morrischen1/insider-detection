@@ -1,6 +1,11 @@
 /**
- * Polymarket Gamma API Client
+ * Polymarket Gamma API Client (Optimized)
  * Used for markets, events, tags, series, comments, sports, search, public profiles
+ * 
+ * Optimizations:
+ * - Response caching for frequently accessed data
+ * - Proper timeout handling
+ * - Memory-efficient caching
  */
 
 import type {
@@ -8,22 +13,43 @@ import type {
   PolymarketEvent,
 } from '@/types';
 import { logApiCall } from '@/lib/logger/api';
+import { TTLCache } from '@/lib/utils/memory';
 
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
+
+// Cache configuration
+const MARKETS_CACHE_TTL = 30 * 1000; // 30 seconds for markets
+const SINGLE_ITEM_CACHE_TTL = 60 * 1000; // 1 minute for single items
+const TAGS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes for tags
+
+// Response caches
+const marketsCache = new TTLCache<string, PolymarketMarket[]>(MARKETS_CACHE_TTL, MARKETS_CACHE_TTL);
+const marketCache = new TTLCache<string, PolymarketMarket>(SINGLE_ITEM_CACHE_TTL, SINGLE_ITEM_CACHE_TTL);
+const eventsCache = new TTLCache<string, PolymarketEvent[]>(MARKETS_CACHE_TTL, MARKETS_CACHE_TTL);
+const eventCache = new TTLCache<string, PolymarketEvent>(SINGLE_ITEM_CACHE_TTL, SINGLE_ITEM_CACHE_TTL);
+const tagsCache = new TTLCache<string, Array<{ id: string; name: string; slug: string }>>(TAGS_CACHE_TTL, TAGS_CACHE_TTL);
 
 interface FetchOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
   body?: Record<string, unknown>;
   headers?: Record<string, string>;
+  timeout?: number;
 }
+
+// Default timeout for API calls
+const DEFAULT_TIMEOUT = 10000; // 10 seconds
 
 async function fetchWithErrorHandling<T>(
   endpoint: string,
   options: FetchOptions = {}
 ): Promise<T> {
-  const { method = 'GET', body, headers = {} } = options;
+  const { method = 'GET', body, headers = {}, timeout = DEFAULT_TIMEOUT } = options;
   const startTime = Date.now();
   const url = `${GAMMA_API_BASE}${endpoint}`;
+
+  // Create abort controller for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
     const response = await fetch(url, {
@@ -33,8 +59,10 @@ async function fetchWithErrorHandling<T>(
         ...headers,
       },
       body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
     });
 
+    clearTimeout(timeoutId);
     const responseTime = Date.now() - startTime;
     const status = response.status;
 
@@ -62,7 +90,21 @@ async function fetchWithErrorHandling<T>(
 
     return data;
   } catch (error) {
+    clearTimeout(timeoutId);
     const responseTime = Date.now() - startTime;
+    
+    if (error instanceof Error && error.name === 'AbortError') {
+      await logApiCall({
+        platform: 'polymarket',
+        endpoint,
+        method,
+        status: 0,
+        responseTime,
+        errorMessage: 'Request timeout',
+      });
+      throw new Error('Request timeout');
+    }
+    
     await logApiCall({
       platform: 'polymarket',
       endpoint,
@@ -93,21 +135,65 @@ export async function getMarkets(params?: {
   if (params?.tag) queryParams.set('tag', params.tag);
 
   const query = queryParams.toString();
-  return fetchWithErrorHandling<PolymarketMarket[]>(`/markets${query ? `?${query}` : ''}`);
+  const cacheKey = `markets-${query}`;
+  
+  // Check cache
+  const cached = marketsCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  
+  const result = await fetchWithErrorHandling<PolymarketMarket[]>(`/markets${query ? `?${query}` : ''}`);
+  marketsCache.set(cacheKey, result);
+  return result;
 }
 
 export async function getMarketById(id: string): Promise<PolymarketMarket> {
-  return fetchWithErrorHandling<PolymarketMarket>(`/markets/${id}`);
+  const cacheKey = `market-${id}`;
+  
+  // Check cache
+  const cached = marketCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  
+  const result = await fetchWithErrorHandling<PolymarketMarket>(`/markets/${id}`);
+  marketCache.set(cacheKey, result);
+  return result;
 }
 
 export async function getMarketBySlug(slug: string): Promise<PolymarketMarket> {
+  const cacheKey = `market-slug-${slug}`;
+  
+  // Check cache
+  const cached = marketCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  
   const markets = await fetchWithErrorHandling<PolymarketMarket[]>(`/markets?slug=${slug}`);
-  return markets[0];
+  const result = markets[0];
+  if (result) {
+    marketCache.set(cacheKey, result);
+  }
+  return result;
 }
 
 export async function getMarketByConditionId(conditionId: string): Promise<PolymarketMarket> {
+  const cacheKey = `market-condition-${conditionId}`;
+  
+  // Check cache
+  const cached = marketCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  
   const markets = await fetchWithErrorHandling<PolymarketMarket[]>(`/markets/condition/${conditionId}`);
-  return markets[0];
+  const result = markets[0];
+  if (result) {
+    marketCache.set(cacheKey, result);
+  }
+  return result;
 }
 
 // Events
@@ -128,24 +214,66 @@ export async function getEvents(params?: {
   if (params?.tag) queryParams.set('tag', params.tag);
 
   const query = queryParams.toString();
-  return fetchWithErrorHandling<PolymarketEvent[]>(`/events${query ? `?${query}` : ''}`);
+  const cacheKey = `events-${query}`;
+  
+  // Check cache
+  const cached = eventsCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  
+  const result = await fetchWithErrorHandling<PolymarketEvent[]>(`/events${query ? `?${query}` : ''}`);
+  eventsCache.set(cacheKey, result);
+  return result;
 }
 
 export async function getEventById(id: string): Promise<PolymarketEvent> {
-  return fetchWithErrorHandling<PolymarketEvent>(`/events/${id}`);
+  const cacheKey = `event-${id}`;
+  
+  // Check cache
+  const cached = eventCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  
+  const result = await fetchWithErrorHandling<PolymarketEvent>(`/events/${id}`);
+  eventCache.set(cacheKey, result);
+  return result;
 }
 
 export async function getEventBySlug(slug: string): Promise<PolymarketEvent> {
+  const cacheKey = `event-slug-${slug}`;
+  
+  // Check cache
+  const cached = eventCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  
   const events = await fetchWithErrorHandling<PolymarketEvent[]>(`/events?slug=${slug}`);
-  return events[0];
+  const result = events[0];
+  if (result) {
+    eventCache.set(cacheKey, result);
+  }
+  return result;
 }
 
 // Tags
 export async function getTags(): Promise<Array<{ id: string; name: string; slug: string }>> {
-  return fetchWithErrorHandling('/tags');
+  const cacheKey = 'tags';
+  
+  // Check cache
+  const cached = tagsCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  
+  const result = await fetchWithErrorHandling<Array<{ id: string; name: string; slug: string }>>('/tags');
+  tagsCache.set(cacheKey, result);
+  return result;
 }
 
-// Search
+// Search - Not cached as queries vary widely
 export async function searchMarkets(query: string, params?: {
   limit?: number;
   offset?: number;
@@ -158,7 +286,7 @@ export async function searchMarkets(query: string, params?: {
   return fetchWithErrorHandling<PolymarketMarket[]>(`/markets/search?${queryParams.toString()}`);
 }
 
-// Comments
+// Comments - Not cached as they change frequently
 export async function getMarketComments(marketId: string): Promise<Array<{
   id: string;
   userId: string;
@@ -215,6 +343,44 @@ export async function getRecentlyResolvedMarkets(hours: number = 24): Promise<Po
   });
 }
 
+/**
+ * Clear all caches - useful for testing or forced refresh
+ */
+export function clearCache(): void {
+  marketsCache.clear();
+  marketCache.clear();
+  eventsCache.clear();
+  eventCache.clear();
+  tagsCache.clear();
+}
+
+/**
+ * Get cache statistics for monitoring
+ */
+export function getCacheStats(): {
+  markets: number;
+  market: number;
+  events: number;
+  event: number;
+  tags: number;
+} {
+  return {
+    markets: marketsCache.size,
+    market: marketCache.size,
+    events: eventsCache.size,
+    event: eventCache.size,
+    tags: tagsCache.size,
+  };
+}
+
+/**
+ * Cleanup resources - Call this on shutdown
+ */
+export function cleanup(): void {
+  clearCache();
+  console.log('Gamma API client cleanup completed');
+}
+
 export const gammaClient = {
   getMarkets,
   getMarketById,
@@ -230,4 +396,7 @@ export const gammaClient = {
   getSportsEvents,
   getActiveMarketsWithLiquidity,
   getRecentlyResolvedMarkets,
+  clearCache,
+  getCacheStats,
+  cleanup,
 };

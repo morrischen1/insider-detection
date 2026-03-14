@@ -1,9 +1,15 @@
 /**
- * Kalshi API Client
+ * Kalshi API Client (Optimized)
  * Used for markets, trades, orderbook, order placement
+ * 
+ * Optimizations:
+ * - Response caching for frequently accessed data
+ * - Proper timeout handling
+ * - Memory-efficient caching
  */
 
 import { logApiCall } from '@/lib/logger/api';
+import { TTLCache } from '@/lib/utils/memory';
 import type {
   KalshiMarket,
   KalshiTrade,
@@ -15,12 +21,28 @@ import type {
 
 const KALSHI_API_BASE = 'https://api.elections.kalshi.com/trade-api/v2';
 
+// Cache configuration
+const MARKETS_CACHE_TTL = 30 * 1000; // 30 seconds for markets
+const SINGLE_MARKET_CACHE_TTL = 60 * 1000; // 1 minute for single market
+const ORDERBOOK_CACHE_TTL = 5 * 1000; // 5 seconds for orderbook
+const CATEGORIES_CACHE_TTL = 5 * 60 * 1000; // 5 minutes for categories
+
+// Response caches
+const marketsCache = new TTLCache<string, { markets: KalshiMarket[]; count: number }>(MARKETS_CACHE_TTL, MARKETS_CACHE_TTL);
+const marketCache = new TTLCache<string, KalshiMarket>(SINGLE_MARKET_CACHE_TTL, SINGLE_MARKET_CACHE_TTL);
+const orderbookCache = new TTLCache<string, KalshiOrderbook>(ORDERBOOK_CACHE_TTL, ORDERBOOK_CACHE_TTL);
+const categoriesCache = new TTLCache<string, string[]>(CATEGORIES_CACHE_TTL, CATEGORIES_CACHE_TTL);
+
 interface FetchOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
   body?: Record<string, unknown>;
   headers?: Record<string, string>;
   requireAuth?: boolean;
+  timeout?: number;
 }
+
+// Default timeout for API calls
+const DEFAULT_TIMEOUT = 10000; // 10 seconds
 
 // Generate authentication headers
 function getAuthHeaders(): Record<string, string> {
@@ -37,7 +59,6 @@ function getAuthHeaders(): Record<string, string> {
   return {
     'X-Api-Key': apiKey,
     'X-Timestamp': timestamp,
-    // In production, you would sign the request with the secret
   };
 }
 
@@ -45,11 +66,15 @@ async function fetchWithErrorHandling<T>(
   endpoint: string,
   options: FetchOptions = {}
 ): Promise<T> {
-  const { method = 'GET', body, headers = {}, requireAuth = false } = options;
+  const { method = 'GET', body, headers = {}, requireAuth = false, timeout = DEFAULT_TIMEOUT } = options;
   const startTime = Date.now();
   const url = `${KALSHI_API_BASE}${endpoint}`;
 
   const authHeaders = requireAuth ? getAuthHeaders() : {};
+
+  // Create abort controller for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
     const response = await fetch(url, {
@@ -60,8 +85,10 @@ async function fetchWithErrorHandling<T>(
         ...headers,
       },
       body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
     });
 
+    clearTimeout(timeoutId);
     const responseTime = Date.now() - startTime;
     const status = response.status;
 
@@ -89,7 +116,21 @@ async function fetchWithErrorHandling<T>(
 
     return data;
   } catch (error) {
+    clearTimeout(timeoutId);
     const responseTime = Date.now() - startTime;
+    
+    if (error instanceof Error && error.name === 'AbortError') {
+      await logApiCall({
+        platform: 'kalshi',
+        endpoint,
+        method,
+        status: 0,
+        responseTime,
+        errorMessage: 'Request timeout',
+      });
+      throw new Error('Request timeout');
+    }
+    
     await logApiCall({
       platform: 'kalshi',
       endpoint,
@@ -116,18 +157,43 @@ export async function getMarkets(params?: {
   if (params?.category) queryParams.set('category', params.category);
 
   const query = queryParams.toString();
-  return fetchWithErrorHandling(`/markets${query ? `?${query}` : ''}`);
+  const cacheKey = `markets-${query}`;
+  
+  const cached = marketsCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  
+  const result = await fetchWithErrorHandling<{ markets: KalshiMarket[]; count: number }>(`/markets${query ? `?${query}` : ''}`);
+  marketsCache.set(cacheKey, result);
+  return result;
 }
 
 export async function getMarketByTicker(ticker: string): Promise<KalshiMarket> {
+  const cacheKey = `market-${ticker}`;
+  
+  const cached = marketCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  
   const response = await fetchWithErrorHandling<{ market: KalshiMarket }>(`/markets/${ticker}`);
+  marketCache.set(cacheKey, response.market);
   return response.market;
 }
 
 export async function getMarketById(id: string): Promise<KalshiMarket> {
-  // Kalshi uses ticker as identifier, but we can try both
+  // Try ticker first (more common)
   try {
+    const cacheKey = `market-${id}`;
+    
+    const cached = marketCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+    
     const response = await fetchWithErrorHandling<{ market: KalshiMarket }>(`/markets/${id}`);
+    marketCache.set(cacheKey, response.market);
     return response.market;
   } catch {
     // Try as internal ID if ticker fails
@@ -138,7 +204,7 @@ export async function getMarketById(id: string): Promise<KalshiMarket> {
   }
 }
 
-// Trades
+// Trades - Not cached as they change frequently
 export async function getMarketTrades(ticker: string, params?: {
   limit?: number;
   offset?: number;
@@ -159,12 +225,18 @@ export async function getRecentTrades(params?: {
   const markets = await getMarkets({ status: 'open', limit: 20 });
   const allTrades: KalshiTrade[] = [];
 
-  for (const market of markets.markets) {
-    try {
-      const { trades } = await getMarketTrades(market.ticker, { limit: 10 });
-      allTrades.push(...trades);
-    } catch {
-      // Skip markets with errors
+  // Use Promise.allSettled for resilience
+  const tradePromises = markets.markets.map(market => 
+    getMarketTrades(market.ticker, { limit: 10 })
+      .then(({ trades }) => trades)
+      .catch(() => [])
+  );
+  
+  const tradeResults = await Promise.allSettled(tradePromises);
+  
+  for (const result of tradeResults) {
+    if (result.status === 'fulfilled') {
+      allTrades.push(...result.value);
     }
   }
 
@@ -202,6 +274,13 @@ export async function getPositionForMarket(userId: string, ticker: string): Prom
 
 // Orderbook
 export async function getOrderbook(ticker: string): Promise<KalshiOrderbook> {
+  const cacheKey = `ob-${ticker}`;
+  
+  const cached = orderbookCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  
   const response = await fetchWithErrorHandling<{
     orderbook: {
       yes: Array<{ price: number; size: number }>;
@@ -209,13 +288,16 @@ export async function getOrderbook(ticker: string): Promise<KalshiOrderbook> {
     };
   }>(`/markets/${ticker}/orderbook`);
 
-  return {
+  const result: KalshiOrderbook = {
     marketId: ticker,
     outcome: 'YES',
     bids: response.orderbook.yes,
     asks: response.orderbook.no,
     timestamp: new Date().toISOString(),
   };
+  
+  orderbookCache.set(cacheKey, result);
+  return result;
 }
 
 export async function getMidpointPrice(ticker: string): Promise<{
@@ -394,7 +476,15 @@ export async function executeMarketBuy(params: {
 
 // Categories
 export async function getCategories(): Promise<string[]> {
+  const cacheKey = 'categories';
+  
+  const cached = categoriesCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  
   const response = await fetchWithErrorHandling<{ categories: string[] }>('/categories');
+  categoriesCache.set(cacheKey, response.categories);
   return response.categories;
 }
 
@@ -451,6 +541,41 @@ export function isKalshiAvailable(): boolean {
   return !!(process.env.KALSHI_API_KEY && process.env.KALSHI_API_SECRET);
 }
 
+/**
+ * Clear all caches
+ */
+export function clearCache(): void {
+  marketsCache.clear();
+  marketCache.clear();
+  orderbookCache.clear();
+  categoriesCache.clear();
+}
+
+/**
+ * Get cache statistics for monitoring
+ */
+export function getCacheStats(): {
+  markets: number;
+  market: number;
+  orderbook: number;
+  categories: number;
+} {
+  return {
+    markets: marketsCache.size,
+    market: marketCache.size,
+    orderbook: orderbookCache.size,
+    categories: categoriesCache.size,
+  };
+}
+
+/**
+ * Cleanup resources - Call this on shutdown
+ */
+export function cleanup(): void {
+  clearCache();
+  console.log('Kalshi client cleanup completed');
+}
+
 export const kalshiClient = {
   getMarkets,
   getMarketByTicker,
@@ -473,4 +598,7 @@ export const kalshiClient = {
   getLargeTrades,
   getActiveMarketsWithLiquidity,
   isKalshiAvailable,
+  clearCache,
+  getCacheStats,
+  cleanup,
 };

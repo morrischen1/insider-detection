@@ -26,9 +26,55 @@ const dbPath = process.env.DATABASE_URL
 // Create database connection
 const db = new Database(dbPath);
 
-// Enable WAL mode and foreign keys
+// Enable WAL mode and foreign keys for performance and integrity
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+
+// Optimize SQLite settings for performance
+db.pragma('synchronous = NORMAL');
+db.pragma('cache_size = -64000'); // 64MB cache
+db.pragma('temp_store = MEMORY');
+db.pragma('mmap_size = 268435456'); // 256MB mmap
+
+// ============================================
+// Prepared Statement Cache
+// ============================================
+
+/**
+ * Cache for prepared statements to avoid recompilation
+ */
+class StatementCache {
+  private cache: Map<string, Database.Statement> = new Map();
+  private db: Database.Database;
+
+  constructor(database: Database.Database) {
+    this.db = database;
+  }
+
+  get(sql: string): Database.Statement {
+    let stmt = this.cache.get(sql);
+    if (!stmt) {
+      stmt = this.db.prepare(sql);
+      this.cache.set(sql, stmt);
+    }
+    return stmt;
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+
+  get size(): number {
+    return this.cache.size;
+  }
+}
+
+const stmtCache = new StatementCache(db);
+
+// Helper to use cached statements
+function prepare(sql: string): Database.Statement {
+  return stmtCache.get(sql);
+}
 
 // ============================================
 // Auto-initialize database schema
@@ -227,7 +273,7 @@ export const accounts = {
   }): { id: string } {
     const id = uuidv4();
     const now = Date.now();
-    const stmt = db.prepare(`
+    const stmt = prepare(`
       INSERT INTO accounts (id, platform, address, first_seen, total_trades, total_volume, win_rate, is_watchlisted, watchlist_reason, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
@@ -248,7 +294,7 @@ export const accounts = {
   },
 
   findById(id: string): AccountInfo | null {
-    const stmt = db.prepare('SELECT * FROM accounts WHERE id = ?');
+    const stmt = prepare('SELECT * FROM accounts WHERE id = ?');
     const row = stmt.get(id) as any;
     if (!row) return null;
     return {
@@ -265,7 +311,7 @@ export const accounts = {
   },
 
   findByPlatformAddress(platform: Platform, address: string): AccountInfo | null {
-    const stmt = db.prepare('SELECT * FROM accounts WHERE platform = ? AND address = ?');
+    const stmt = prepare('SELECT * FROM accounts WHERE platform = ? AND address = ?');
     const row = stmt.get(platform, address) as any;
     if (!row) return null;
     return {
@@ -294,7 +340,7 @@ export const accounts = {
     const existing = this.findByPlatformAddress(data.platform, data.address);
     if (existing) {
       const now = Date.now();
-      const stmt = db.prepare(`
+      const stmt = prepare(`
         UPDATE accounts
         SET total_trades = ?, total_volume = ?, win_rate = ?, is_watchlisted = ?, watchlist_reason = ?, updated_at = ?
         WHERE id = ?
@@ -315,7 +361,7 @@ export const accounts = {
 
   updateStats(id: string, data: { totalTrades?: number; totalVolume?: number; winRate?: number }): void {
     const now = Date.now();
-    const stmt = db.prepare(`
+    const stmt = prepare(`
       UPDATE accounts SET total_trades = ?, total_volume = ?, win_rate = ?, updated_at = ? WHERE id = ?
     `);
     stmt.run(data.totalTrades, data.totalVolume, data.winRate ?? null, now, id);
@@ -323,7 +369,7 @@ export const accounts = {
 
   setWatchlisted(id: string, isWatchlisted: boolean, reason?: string): void {
     const now = Date.now();
-    const stmt = db.prepare(`
+    const stmt = prepare(`
       UPDATE accounts SET is_watchlisted = ?, watchlist_reason = ?, updated_at = ? WHERE id = ?
     `);
     stmt.run(isWatchlisted ? 1 : 0, reason ?? null, now, id);
@@ -332,7 +378,7 @@ export const accounts = {
   getWatchlisted(platform?: Platform): AccountInfo[] {
     let stmt;
     if (platform) {
-      stmt = db.prepare('SELECT * FROM accounts WHERE platform = ? AND is_watchlisted = 1');
+      stmt = prepare('SELECT * FROM accounts WHERE platform = ? AND is_watchlisted = 1');
       return (stmt.all(platform) as any[]).map(row => ({
         id: row.id,
         platform: row.platform,
@@ -345,7 +391,7 @@ export const accounts = {
         watchlistReason: row.watchlist_reason ?? undefined,
       }));
     }
-    stmt = db.prepare('SELECT * FROM accounts WHERE is_watchlisted = 1');
+    stmt = prepare('SELECT * FROM accounts WHERE is_watchlisted = 1');
     return (stmt.all() as any[]).map(row => ({
       id: row.id,
       platform: row.platform,
@@ -361,10 +407,10 @@ export const accounts = {
 
   count(platform?: Platform): number {
     if (platform) {
-      const stmt = db.prepare('SELECT COUNT(*) as count FROM accounts WHERE platform = ?');
+      const stmt = prepare('SELECT COUNT(*) as count FROM accounts WHERE platform = ?');
       return (stmt.get(platform) as any).count;
     }
-    const stmt = db.prepare('SELECT COUNT(*) as count FROM accounts');
+    const stmt = prepare('SELECT COUNT(*) as count FROM accounts');
     return (stmt.get() as any).count;
   },
 };
@@ -389,7 +435,7 @@ export const trades = {
   }): { id: string } {
     const id = uuidv4();
     const now = Date.now();
-    const stmt = db.prepare(`
+    const stmt = prepare(`
       INSERT INTO trades (id, platform, market_id, market_ticker, account_id, outcome, price, size, usd_value, timestamp, detected_at, is_suspicious, insider_probability)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
@@ -412,7 +458,7 @@ export const trades = {
   },
 
   findById(id: string): TradeInfo & { detectedAt: Date; isSuspicious: boolean; insiderProbability?: number } | null {
-    const stmt = db.prepare('SELECT * FROM trades WHERE id = ?');
+    const stmt = prepare('SELECT * FROM trades WHERE id = ?');
     const row = stmt.get(id) as any;
     if (!row) return null;
     return {
@@ -448,7 +494,7 @@ export const trades = {
     sql += ' ORDER BY timestamp DESC LIMIT ?';
     params.push(limit);
 
-    const stmt = db.prepare(sql);
+    const stmt = prepare(sql);
     const rows = stmt.all(...params) as any[];
 
     return rows.map(row => ({
@@ -468,7 +514,7 @@ export const trades = {
   },
 
   getRecentDetections(limit: number = 20): RecentDetection[] {
-    const stmt = db.prepare(`
+    const stmt = prepare(`
       SELECT t.*, a.address as account_address
       FROM trades t
       JOIN accounts a ON t.account_id = a.id
@@ -505,13 +551,13 @@ export const trades = {
       sql += ' WHERE is_suspicious = 1';
     }
 
-    const stmt = db.prepare(sql);
+    const stmt = prepare(sql);
     return (stmt.get(...params) as any).count;
   },
 
   deleteOld(days: number): number {
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-    const stmt = db.prepare('DELETE FROM trades WHERE detected_at < ?');
+    const stmt = prepare('DELETE FROM trades WHERE detected_at < ?');
     const result = stmt.run(cutoff);
     return result.changes;
   },
@@ -531,28 +577,32 @@ export const watchlist = {
     const id = uuidv4();
     const now = Date.now();
 
-    // Deactivate existing active watchlist entries for this account
-    const deactivateStmt = db.prepare('UPDATE watchlist SET is_active = 0 WHERE account_id = ? AND is_active = 1');
-    deactivateStmt.run(data.accountId);
+    // Use transaction for atomicity
+    const addTransaction = db.transaction(() => {
+      // Deactivate existing active watchlist entries for this account
+      const deactivateStmt = prepare('UPDATE watchlist SET is_active = 0 WHERE account_id = ? AND is_active = 1');
+      deactivateStmt.run(data.accountId);
 
-    // Insert new entry
-    const stmt = db.prepare(`
-      INSERT INTO watchlist (id, account_id, platform, reason, probability, flagged_at, is_active)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
-    `);
-    stmt.run(id, data.accountId, data.platform, data.reason, data.probability, now);
+      // Insert new entry
+      const insertStmt = prepare(`
+        INSERT INTO watchlist (id, account_id, platform, reason, probability, flagged_at, is_active)
+        VALUES (?, ?, ?, ?, ?, ?, 1)
+      `);
+      insertStmt.run(id, data.accountId, data.platform, data.reason, data.probability, now);
 
-    // Update account
-    accounts.setWatchlisted(data.accountId, true, data.reason);
+      // Update account
+      accounts.setWatchlisted(data.accountId, true, data.reason);
+    });
 
+    addTransaction();
     return { id };
   },
 
   remove(id: string): void {
-    const stmt = db.prepare('SELECT account_id FROM watchlist WHERE id = ?');
+    const stmt = prepare('SELECT account_id FROM watchlist WHERE id = ?');
     const row = stmt.get(id) as any;
     if (row) {
-      const updateStmt = db.prepare('UPDATE watchlist SET is_active = 0 WHERE id = ?');
+      const updateStmt = prepare('UPDATE watchlist SET is_active = 0 WHERE id = ?');
       updateStmt.run(id);
       accounts.setWatchlisted(row.account_id, false);
     }
@@ -569,7 +619,7 @@ export const watchlist = {
     }
     sql += ' ORDER BY w.flagged_at DESC';
 
-    const stmt = db.prepare(sql);
+    const stmt = prepare(sql);
     const rows = stmt.all() as any[];
 
     return rows.map(row => ({
@@ -588,7 +638,7 @@ export const watchlist = {
     if (activeOnly) {
       sql += ' WHERE is_active = 1';
     }
-    const stmt = db.prepare(sql);
+    const stmt = prepare(sql);
     return (stmt.get() as any).count;
   },
 };
@@ -605,7 +655,7 @@ export const detectionLogs = {
     details?: Record<string, unknown>;
   }): { id: string } {
     const id = uuidv4();
-    const stmt = db.prepare(`
+    const stmt = prepare(`
       INSERT INTO detection_logs (id, platform, type, message, details, timestamp)
       VALUES (?, ?, ?, ?, ?, ?)
     `);
@@ -634,7 +684,7 @@ export const detectionLogs = {
     sql += ' ORDER BY timestamp DESC LIMIT ?';
     params.push(limit);
 
-    const stmt = db.prepare(sql);
+    const stmt = prepare(sql);
     const rows = stmt.all(...params) as any[];
 
     return rows.map(row => ({
@@ -649,7 +699,7 @@ export const detectionLogs = {
 
   deleteOld(days: number): number {
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-    const stmt = db.prepare('DELETE FROM detection_logs WHERE timestamp < ?');
+    const stmt = prepare('DELETE FROM detection_logs WHERE timestamp < ?');
     const result = stmt.run(cutoff);
     return result.changes;
   },
@@ -669,7 +719,7 @@ export const apiLogs = {
     errorMessage?: string;
   }): { id: string } {
     const id = uuidv4();
-    const stmt = db.prepare(`
+    const stmt = prepare(`
       INSERT INTO api_logs (id, platform, endpoint, method, status, response_time, error_message, timestamp)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
@@ -679,13 +729,13 @@ export const apiLogs = {
 
   deleteOld(hours: number = 72): number {
     const cutoff = Date.now() - hours * 60 * 60 * 1000;
-    const stmt = db.prepare('DELETE FROM api_logs WHERE timestamp < ?');
+    const stmt = prepare('DELETE FROM api_logs WHERE timestamp < ?');
     const result = stmt.run(cutoff);
     return result.changes;
   },
 
   getErrors(limit: number = 50): any[] {
-    const stmt = db.prepare('SELECT * FROM api_logs WHERE status >= 400 ORDER BY timestamp DESC LIMIT ?');
+    const stmt = prepare('SELECT * FROM api_logs WHERE status >= 400 ORDER BY timestamp DESC LIMIT ?');
     return stmt.all(limit) as any[];
   },
 };
@@ -705,7 +755,7 @@ export const autoTrades = {
     status: AutoTradeStatus;
   }): { id: string } {
     const id = uuidv4();
-    const stmt = db.prepare(`
+    const stmt = prepare(`
       INSERT INTO auto_trades (id, platform, trigger_trade_id, market_id, outcome, amount, probability, status, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
@@ -715,7 +765,7 @@ export const autoTrades = {
 
   updateStatus(id: string, status: AutoTradeStatus, errorMessage?: string): void {
     const executedAt = status === 'executed' ? Date.now() : null;
-    const stmt = db.prepare(`
+    const stmt = prepare(`
       UPDATE auto_trades SET status = ?, executed_at = ?, error_message = ? WHERE id = ?
     `);
     stmt.run(status, executedAt, errorMessage ?? null, id);
@@ -733,19 +783,19 @@ export const autoTrades = {
     sql += ' ORDER BY created_at DESC LIMIT ?';
     params.push(limit);
 
-    const stmt = db.prepare(sql);
+    const stmt = prepare(sql);
     return stmt.all(...params) as any[];
   },
 
   countToday(): number {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
-    const stmt = db.prepare('SELECT COUNT(*) as count FROM auto_trades WHERE created_at >= ?');
+    const stmt = prepare('SELECT COUNT(*) as count FROM auto_trades WHERE created_at >= ?');
     return (stmt.get(todayStart.getTime()) as any).count;
   },
 
   countByStatus(status: AutoTradeStatus): number {
-    const stmt = db.prepare('SELECT COUNT(*) as count FROM auto_trades WHERE status = ?');
+    const stmt = prepare('SELECT COUNT(*) as count FROM auto_trades WHERE status = ?');
     return (stmt.get(status) as any).count;
   },
 };
@@ -758,18 +808,18 @@ export const config = {
   get(key: string, platform?: Platform): string | undefined {
     let stmt;
     if (platform) {
-      stmt = db.prepare('SELECT value FROM config WHERE key = ? AND platform = ?');
+      stmt = prepare('SELECT value FROM config WHERE key = ? AND platform = ?');
       const row = stmt.get(key, platform) as any;
       return row?.value;
     }
-    stmt = db.prepare('SELECT value FROM config WHERE key = ? AND platform IS NULL');
+    stmt = prepare('SELECT value FROM config WHERE key = ? AND platform IS NULL');
     const row = stmt.get(key) as any;
     return row?.value;
   },
 
   set(key: string, value: string, platform?: Platform): void {
     const now = Date.now();
-    const stmt = db.prepare(`
+    const stmt = prepare(`
       INSERT INTO config (key, value, platform, updated_at)
       VALUES (?, ?, ?, ?)
       ON CONFLICT(key, platform) DO UPDATE SET value = ?, updated_at = ?
@@ -834,7 +884,7 @@ export const config = {
   },
 
   getAll(): Record<string, { value: string; platform?: string }> {
-    const stmt = db.prepare('SELECT key, value, platform FROM config');
+    const stmt = prepare('SELECT key, value, platform FROM config');
     const rows = stmt.all() as any[];
     const result: Record<string, { value: string; platform?: string }> = {};
     for (const row of rows) {
@@ -859,24 +909,28 @@ export const notificationSettings = {
     const id = uuidv4();
     const now = Date.now();
 
-    // Deactivate existing of same type
-    const deactivateStmt = db.prepare('UPDATE notification_settings SET is_active = 0 WHERE type = ? AND (platform = ? OR (platform IS NULL AND ? IS NULL))');
-    deactivateStmt.run(data.type, data.platform ?? null, data.platform ?? null);
+    // Use transaction
+    const setTransaction = db.transaction(() => {
+      // Deactivate existing of same type
+      const deactivateStmt = prepare('UPDATE notification_settings SET is_active = 0 WHERE type = ? AND (platform = ? OR (platform IS NULL AND ? IS NULL))');
+      deactivateStmt.run(data.type, data.platform ?? null, data.platform ?? null);
 
-    // Insert new
-    const stmt = db.prepare(`
-      INSERT INTO notification_settings (id, type, config, is_active, platform, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-    stmt.run(id, data.type, JSON.stringify(data.config), data.isActive !== false ? 1 : 0, data.platform ?? null, now, now);
+      // Insert new
+      const insertStmt = prepare(`
+        INSERT INTO notification_settings (id, type, config, is_active, platform, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      insertStmt.run(id, data.type, JSON.stringify(data.config), data.isActive !== false ? 1 : 0, data.platform ?? null, now, now);
+    });
 
+    setTransaction();
     return { id };
   },
 
   get(type: NotificationType, platform?: Platform): { id: string; config: any; isActive: boolean } | null {
     let stmt;
     if (platform) {
-      stmt = db.prepare('SELECT * FROM notification_settings WHERE type = ? AND platform = ? AND is_active = 1');
+      stmt = prepare('SELECT * FROM notification_settings WHERE type = ? AND platform = ? AND is_active = 1');
       const row = stmt.get(type, platform) as any;
       if (!row) return null;
       return {
@@ -885,7 +939,7 @@ export const notificationSettings = {
         isActive: row.is_active === 1,
       };
     }
-    stmt = db.prepare('SELECT * FROM notification_settings WHERE type = ? AND platform IS NULL AND is_active = 1');
+    stmt = prepare('SELECT * FROM notification_settings WHERE type = ? AND platform IS NULL AND is_active = 1');
     const row = stmt.get(type) as any;
     if (!row) return null;
     return {
@@ -896,7 +950,7 @@ export const notificationSettings = {
   },
 
   getActive(): { type: NotificationType; config: any; platform?: Platform } | null {
-    const stmt = db.prepare('SELECT * FROM notification_settings WHERE is_active = 1 LIMIT 1');
+    const stmt = prepare('SELECT * FROM notification_settings WHERE is_active = 1 LIMIT 1');
     const row = stmt.get() as any;
     if (!row) return null;
     return {
@@ -907,7 +961,7 @@ export const notificationSettings = {
   },
 
   getAll(): { id: string; type: NotificationType; config: any; isActive: boolean; platform?: Platform }[] {
-    const stmt = db.prepare('SELECT * FROM notification_settings ORDER BY created_at DESC');
+    const stmt = prepare('SELECT * FROM notification_settings ORDER BY created_at DESC');
     const rows = stmt.all() as any[];
     return rows.map(row => ({
       id: row.id,
@@ -924,22 +978,29 @@ export const notificationSettings = {
 // ============================================
 
 export function getDashboardStats(): DashboardStats {
-  const totalTrades = trades.count();
-  const suspiciousTrades = trades.count(undefined, true);
-  const watchlistCount = watchlist.count(true);
-  const autoTradesToday = autoTrades.countToday();
+  // Use transaction for consistent reads
+  const getStats = db.transaction(() => {
+    const totalTrades = trades.count();
+    const suspiciousTrades = trades.count(undefined, true);
+    const watchlistCount = watchlist.count(true);
+    const autoTradesToday = autoTrades.countToday();
 
-  // Calculate average insider probability
-  const stmt = db.prepare('SELECT AVG(insider_probability) as avg FROM trades WHERE is_suspicious = 1 AND insider_probability IS NOT NULL');
-  const avgResult = stmt.get() as any;
+    // Calculate average insider probability
+    const stmt = prepare('SELECT AVG(insider_probability) as avg FROM trades WHERE is_suspicious = 1 AND insider_probability IS NOT NULL');
+    const avgResult = stmt.get() as any;
+
+    return { totalTrades, suspiciousTrades, watchlistCount, autoTradesToday, avgResult };
+  });
+
+  const stats = getStats();
 
   return {
-    totalTrades,
-    suspiciousTrades,
-    watchlistCount,
-    autoTradesToday,
-    detectionRate: totalTrades > 0 ? (suspiciousTrades / totalTrades) * 100 : 0,
-    avgInsiderProbability: avgResult?.avg ?? 0,
+    totalTrades: stats.totalTrades,
+    suspiciousTrades: stats.suspiciousTrades,
+    watchlistCount: stats.watchlistCount,
+    autoTradesToday: stats.autoTradesToday,
+    detectionRate: stats.totalTrades > 0 ? (stats.suspiciousTrades / stats.totalTrades) * 100 : 0,
+    avgInsiderProbability: stats.avgResult?.avg ?? 0,
   };
 }
 
@@ -953,6 +1014,47 @@ export function cleanup(retentionDays: number): { tradesDeleted: number; logsDel
   const apiLogsDeleted = apiLogs.deleteOld(72); // API logs always 72h
 
   return { tradesDeleted, logsDeleted, apiLogsDeleted };
+}
+
+// ============================================
+// Database management
+// ============================================
+
+/**
+ * Optimize the database (run VACUUM and ANALYZE)
+ */
+export function optimizeDatabase(): void {
+  db.exec('PRAGMA optimize');
+  console.log('Database optimized');
+}
+
+/**
+ * Get database statistics
+ */
+export function getDbStats(): {
+  statementCacheSize: number;
+  dbSize: number;
+  pageCount: number;
+  pageSize: number;
+} {
+  const pageStats = db.pragma('page_count', { simple: true }) as number;
+  const pageSize = db.pragma('page_size', { simple: true }) as number;
+
+  return {
+    statementCacheSize: stmtCache.size,
+    dbSize: pageStats * pageSize,
+    pageCount: pageStats,
+    pageSize: pageSize,
+  };
+}
+
+/**
+ * Close database connection - Call this on shutdown
+ */
+export function closeDatabase(): void {
+  stmtCache.clear();
+  db.close();
+  console.log('Database connection closed');
 }
 
 // Export database for direct access if needed

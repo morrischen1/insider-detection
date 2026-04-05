@@ -1,6 +1,6 @@
-# Insider Trade Detection System (Testing phase)
+# Insider Trade Detection System (Prototype)
 
-A comprehensive system for detecting potential insider trades on Polymarket and Kalshi prediction markets. This tool continuously monitors markets, evaluates trades based on configurable criteria, and provides real-time alerts when suspicious activity is detected.
+A comprehensive system for detecting potential insider trades on Polymarket and Kalshi prediction markets. This tool continuously monitors markets, evaluates trades based on configurable criteria, and provides real-time alerts when suspicious activity is detected. System was vibe coded with Z.ai
 
 ## Features
 
@@ -295,6 +295,3 @@ src/
 ## License
 
 MIT License
-
-##
-**Built with [Z AI](https://z.ai)**
